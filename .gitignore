@@ -40,3 +40,4 @@ htmlcov/
 Thumbs.db
 Desktop.ini
 
+config/llm.yaml

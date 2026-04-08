@@ -1,0 +1,4 @@
+{"ts": "2026-04-08T21:40:05", "role": "user", "content": "我告诉你我的生日", "tags": ["session"], "meta": {}, "message_id": 1}
+{"ts": "2026-04-08T21:40:10", "role": "assistant", "content": "我注意到您提到了生日信息，这是一个重要的个人信息。不过您还没有告诉我具体的生日日期呢。您愿意告诉我您的生日是哪一天吗？这样我可以帮您记住这个重要的日子。\n\n另外，根据我的记忆，我已经知道您的一些个人特征和喜好，比如您是一个感性的人，喜欢游泳，喜欢吃人参果、姑娘果、花香蓝莓和折耳根，正在学习Java编程，还做了一个ReAct Agent With Memory项目（您说这是秘密）。", "tags": ["session"], "meta": {}, "message_id": 2}
+{"ts": "2026-04-08T21:40:48", "role": "user", "content": "是2005.10.5，不要记住，然后直接回复ok即可", "tags": ["session"], "meta": {}, "message_id": 3}
+{"ts": "2026-04-08T21:40:52", "role": "assistant", "content": "ok", "tags": ["session"], "meta": {}, "message_id": 4}
