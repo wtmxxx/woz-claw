@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
-from agent_memory_demo import app as app_module
+from wozclaw import app as app_module
 
 
 def test_get_conversation_messages_accepts_numeric_message_id(monkeypatch) -> None:

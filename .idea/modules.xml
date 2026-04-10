@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/agent-memory-demo.iml" filepath="$PROJECT_DIR$/.idea/agent-memory-demo.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/woz-claw.iml" filepath="$PROJECT_DIR$/.idea/woz-claw.iml" />
     </modules>
   </component>
 </project>

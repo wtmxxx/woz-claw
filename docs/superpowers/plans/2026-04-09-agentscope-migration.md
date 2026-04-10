@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 def test_agent_module_no_legacy_framework_imports() -> None:
-    source = Path("src/agent_memory_demo/agent.py").read_text(encoding="utf-8")
+    source = Path("src/wozclaw/agent.py").read_text(encoding="utf-8")
 
     assert "legacy framework import marker" not in source
 ```
@@ -43,7 +43,7 @@ git commit -m "test: add migration guard against legacy framework imports"
 ### Task 2: 迁移 Agent 运行时到 AgentScope（绿）
 
 **Files:**
-- Modify: `src/agent_memory_demo/agent.py`
+- Modify: `src/wozclaw/agent.py`
 - Test: `tests/test_agent_prompt.py`
 
 - [ ] **Step 1: 实现 AgentScope ReAct 运行时并保留现有外部接口**
@@ -65,7 +65,7 @@ Expected: PASS。
 - [ ] **Step 3: 提交 Agent 迁移变更**
 
 ```bash
-git add src/agent_memory_demo/agent.py tests/test_agent_prompt.py
+git add src/wozclaw/agent.py tests/test_agent_prompt.py
 git commit -m "refactor: migrate runtime to agentscope"
 ```
 

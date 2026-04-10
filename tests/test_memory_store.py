@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from agent_memory_demo.memory_store import MemoryStore
+from wozclaw.memory_store import MemoryStore
 
 
 def test_append_and_load_recent_context(tmp_path: Path) -> None:
@@ -252,3 +252,23 @@ def test_build_prompt_context_omits_empty_sections(tmp_path: Path) -> None:
     assert "[SESSION]" not in context_text
     assert "[DAILY]" not in context_text
     assert "[LONG_TERM]" not in context_text
+
+
+def test_load_context_session_uses_token_budget_not_round_limit(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    # Create several short messages that should all fit in a generous token budget.
+    for i in range(5):
+        store.append_session_message("u12", "s12", "user", f"短消息{i}")
+
+    result = store.load_context(
+        "u12",
+        "s12",
+        query="测试",
+        session_limit=1,
+        session_token_budget=200,
+        daily_limit=0,
+    )
+
+    # New behavior: session selection should follow token budget, not session_limit rounds.
+    assert len(result.session_messages) > 1

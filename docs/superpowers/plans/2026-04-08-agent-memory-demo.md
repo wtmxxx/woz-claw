@@ -1,4 +1,4 @@
-# Agent Memory Demo Implementation Plan
+# WozClaw Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -14,7 +14,7 @@
 
 **Files:**
 - Create: `tests/test_memory_store.py`
-- Create: `src/agent_memory_demo/memory_store.py`
+- Create: `src/wozclaw/memory_store.py`
 
 - [ ] Step 1: 写 failing tests
 - [ ] Step 2: 运行测试验证失败
@@ -24,8 +24,8 @@
 ### Task 2: Agent 与 Service
 
 **Files:**
-- Create: `src/agent_memory_demo/agent.py`
-- Create: `src/agent_memory_demo/service.py`
+- Create: `src/wozclaw/agent.py`
+- Create: `src/wozclaw/service.py`
 - Create: `tests/test_chat_service.py`
 
 - [ ] Step 1: 写 service 回退逻辑 failing test
@@ -36,9 +36,9 @@
 ### Task 3: FastAPI 与前端
 
 **Files:**
-- Create: `src/agent_memory_demo/app.py`
-- Create: `src/agent_memory_demo/static/index.html`
-- Create: `src/agent_memory_demo/__init__.py`
+- Create: `src/wozclaw/app.py`
+- Create: `src/wozclaw/static/index.html`
+- Create: `src/wozclaw/__init__.py`
 
 - [ ] Step 1: 添加 API 与静态页面
 - [ ] Step 2: 本地启动验证可访问

@@ -1,0 +1,4 @@
+sandbox:
+  # Optional extra writable directory for AI shell access.
+  # Relative path is resolved from project root; absolute path is also supported.
+  writable_dir: "workdir"

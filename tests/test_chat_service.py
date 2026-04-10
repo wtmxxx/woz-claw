@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 
-from agent_memory_demo.agent import AgentResponse
-from agent_memory_demo.memory_store import MemoryStore
-from agent_memory_demo.service import ChatService
+from wozclaw.agent import AgentResponse
+from wozclaw.memory_store import MemoryStore
+from wozclaw.service import ChatService
 
 
 class DummyAgent:
@@ -102,22 +102,26 @@ def test_chat_service_persists_messages_and_uses_context(tmp_path: Path) -> None
     assert messages[1]["role"] == "assistant"
 
 
-def test_chat_service_only_injects_recent_three_rounds(tmp_path: Path) -> None:
+def test_chat_service_injects_session_by_token_budget(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     agent = DummyAgent()
     service = ChatService(memory_store=store, agent=agent,
                           title_generator=DummyTitleGenerator())
 
-    # Prepare 4 full rounds first.
-    for idx in range(1, 5):
-        store.append_session_message("u2", "s2", "user", f"u{idx}")
-        store.append_session_message("u2", "s2", "assistant", f"a{idx}")
+    # Prepare many long messages so token budget excludes older context.
+    long_chunk = "x" * 1200
+    for idx in range(1, 9):
+        store.append_session_message(
+            "u2", "s2", "user", f"u{idx}-{long_chunk}")
+        store.append_session_message(
+            "u2", "s2", "assistant", f"a{idx}-{long_chunk}")
 
     service.chat(user_id="u2", session_id="s2", message="当前问题")
 
+    assert "u1-" not in agent.last_context
+    assert "a1-" not in agent.last_context
     assert "u1" not in agent.last_context
-    assert "a1" not in agent.last_context
-    assert "u4" in agent.last_context
+    assert "u8-" in agent.last_context
     assert "[DAILY]" not in agent.last_context
     assert "今天" not in agent.last_context
 

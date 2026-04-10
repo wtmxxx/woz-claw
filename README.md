@@ -1,4 +1,4 @@
-# Agent Memory Demo
+# WozClaw
 
 一个最小可运行、可观察、可验证的记忆型 Agent Demo。
 
@@ -68,32 +68,35 @@ skills:
 规则：
 - 全局配置与用户配置会合并；同名技能下，用户配置优先。
 - 最终仅加载 `enabled: true` 的技能。
-- 全局技能目录：`skills/global/{name}/SKILL.md`。
-- 用户技能目录：`skills/{user_id}/{name}/SKILL.md`。
+- 全局技能目录：`.sandbox/skills/global/{name}/SKILL.md`。
+- 用户技能目录：`.sandbox/skills/{user_id}/{name}/SKILL.md`。
 - 技能目录中必须存在 `SKILL.md` 才会加载。
 - 文件不存在或格式错误时会自动降级为“不加载任何技能”，不影响聊天主流程。
 
 ### 1.2 技能文件 Shell 工具边界
 
-Agent 提供 `skill_shell_command` 用于读取/修改技能目录下文件。此工具是受限 shell：
+Agent 提供 `bash_command` 用于读取/修改技能目录下文件。此工具是受限 shell：
 
-- 工作目录固定为项目的 `skills/` 根目录。
-- 只能使用相对路径（相对于 `skills/`）。
-- 禁止绝对路径、`..`、管道、重定向、多命令拼接、环境变量访问。
+- 统一使用 `bash -lc` 执行命令，工作目录固定为项目根目录。
+- 路径表达约定：`root/` 表示工作区根目录。
+- 内置 sandbox 为 `.sandbox/`（技能默认放在 `.sandbox/skills/`）。
+- 若配置了 `config/sandbox.yaml` 的 `sandbox.writable_dir`，也可以访问该目录（使用其真实路径或 `root/` 相对路径）。
+- 禁止绝对路径、`..`、管道、重定向、多命令拼接、环境变量插值。
 
-常用正确示例（Windows）：
+常用正确示例：
 
-```powershell
-Get-ChildItem demo-user
-Get-Content demo-user/demo-user-style/SKILL.md
-Set-Content demo-user/demo-user-style/SKILL.md -Value "..."
+```bash
+ls .sandbox/skills/demo-user
+cat .sandbox/skills/demo-user/demo-user-style/SKILL.md
+cat root/README.md
+mkdir -p .sandbox/skills/demo-user/new-skill
 ```
 
 错误示例：
 
-- `Get-Content skills/demo-user/demo-user-style/SKILL.md`（重复写了 `skills/` 前缀）
-- `Get-Content ../skills/demo-user/demo-user-style/SKILL.md`（包含 `..`）
-- `Get-Content demo-user/demo-user-style/SKILL.md ; Get-ChildItem`（多命令）
+- `cat ../skills/demo-user/demo-user-style/SKILL.md`（包含 `..`）
+- `cat /etc/passwd`（绝对路径）
+- `cat .sandbox/skills/demo-user/demo-user-style/SKILL.md ; ls`（多命令）
 
 ### 2. 统一消息结构
 
@@ -215,7 +218,7 @@ llm:
 3. 启动服务
 
 ```bash
-python -m uvicorn agent_memory_demo.app:app --reload
+python -m uvicorn wozclaw.app:app --reload
 ```
 
 4. 打开页面

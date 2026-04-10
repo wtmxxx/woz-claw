@@ -1,4 +1,4 @@
-# Agent Memory Demo Design
+# WozClaw Design
 
 ## 1. 目标
 构建一个最小可运行的对话 Agent Demo，支持文件系统记忆，能记住用户长期偏好、会话短期上下文和每日记忆，并通过前端页面交互验证效果。

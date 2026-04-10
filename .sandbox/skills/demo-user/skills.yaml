@@ -1,0 +1,11 @@
+skills:
+  - name: memory-tools
+    enabled: false
+  - name: reply-style
+    enabled: true
+  - name: cooking-skill
+    enabled: false
+  - name: self-improving-agent
+    enabled: true
+  - name: weather
+    enabled: true

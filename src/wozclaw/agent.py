@@ -6,7 +6,6 @@ import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +16,8 @@ from agentscope.model import OpenAIChatModel
 from agentscope.tool import ToolResponse, Toolkit
 import yaml
 
-from agent_memory_demo.config import load_llm_config
-from agent_memory_demo.memory_store import MemoryStore
+from wozclaw.config import load_llm_config, load_sandbox_config
+from wozclaw.memory_store import MemoryStore
 
 
 @dataclass
@@ -68,7 +67,7 @@ class ReActMemoryAgent:
             toolkit=toolkit,
             enable_rewrite_query=False,
             print_hint_msg=False,
-            max_iters=20,
+            max_iters=100,
         )
         self._fallback = FallbackAgent()
 
@@ -261,27 +260,15 @@ class ReActMemoryAgent:
             self._record_tool_trace("get_daily_window", input_payload, output)
             return self._to_tool_response(output)
 
-        def skill_shell_command(command: str) -> ToolResponse:
-            """Run a restricted shell command inside the skills root only.
-
-            Boundaries:
-            - Working directory is fixed to the project `skills/` root.
-            - Use relative paths from `skills/` root (e.g. `demo-user/demo-user-style/SKILL.md`).
-            - Do NOT use absolute paths, `..`, command chaining, pipes, redirection, or environment access.
-            - For `Get-Content` / `Set-Content` / `Add-Content`, you must specify `-Encoding UTF8`.
-
-            Preferred commands on Windows:
-            - Read: `Get-Content demo-user/demo-user-style/SKILL.md -Encoding UTF8`
-            - List: `Get-ChildItem demo-user`
-            - Write: `Set-Content demo-user/demo-user-style/SKILL.md -Value "..." -Encoding UTF8`
-            """
+        def bash_command(command: str) -> ToolResponse:
+            """Run a restricted bash command inside configured sandbox directories only."""
             input_payload = {"command": command}
             try:
-                output = self._run_skill_shell_command(command)
+                output = self._run_bash_command(command)
             except Exception as exc:  # pragma: no cover
                 output = f"error: {exc}"
             self._record_tool_trace(
-                "skill_shell_command", input_payload, output)
+                "bash_command", input_payload, output)
             return self._to_tool_response(output)
 
         toolkit.register_tool_function(remember_note)
@@ -290,81 +277,166 @@ class ReActMemoryAgent:
         toolkit.register_tool_function(get_session_window)
         toolkit.register_tool_function(search_daily)
         toolkit.register_tool_function(get_daily_window)
-        toolkit.register_tool_function(skill_shell_command)
+        toolkit.register_tool_function(bash_command)
         self._register_user_skills(toolkit)
         return toolkit
 
-    def _validate_skill_shell_command(self, command: str) -> tuple[bool, str]:
+    def _validate_bash_command(self, command: str) -> tuple[bool, str]:
         text = command.strip()
         if not text:
             return False, "empty command"
 
-        # Disallow multi-command chaining, redirection, env access, and path traversal.
-        forbidden_tokens = ["&&", "||", ";", "|", ">", "<", "`", "$env:", ".."]
-        lowered = text.lower()
-        for token in forbidden_tokens:
-            if token in lowered:
-                return False, f"unsafe token: {token}"
-
-        # Disallow absolute paths on Windows and POSIX style root paths.
-        if ":\\" in text or text.startswith("/") or " /" in text:
-            return False, "unsafe absolute path"
-
-        first = text.split(maxsplit=1)[0].strip().lower()
-        allowed = {
-            "get-childitem",
-            "get-content",
-            "set-content",
-            "add-content",
-            "new-item",
-            "remove-item",
-            "copy-item",
-            "move-item",
-            "test-path",
-            "select-string",
-            "ls",
-            "cat",
-            "echo",
-            "mkdir",
-        }
-        if first not in allowed:
-            return False, f"unsafe command: {first}"
-
-        if first in {"get-content", "set-content", "add-content", "cat"}:
-            if re.search(r"-encoding\s+utf-?8\b", lowered) is None:
-                return False, "encoding must be UTF8"
+        # Only disallow actual path traversal segments outside shell quotes.
+        if self._contains_path_traversal(text, ignore_quoted=True):
+            return False, "unsafe token: .."
 
         return True, ""
 
-    def _run_skill_shell_command(self, command: str) -> str:
-        ok, reason = self._validate_skill_shell_command(command)
+    def _contains_path_traversal(self, text: str, ignore_quoted: bool) -> bool:
+        if ignore_quoted:
+            text = self._strip_quoted_text(text)
+        return re.search(r'(^|[\s\\/])\.\.([\\/]|$)', text) is not None
+
+    def _strip_quoted_text(self, text: str) -> str:
+        result: list[str] = []
+        quote_char: str | None = None
+        escaped = False
+
+        for char in text:
+            if escaped:
+                result.append(" ")
+                escaped = False
+                continue
+
+            if quote_char is None:
+                if char == "\\":
+                    result.append(" ")
+                    escaped = True
+                elif char in {'"', "'", "`"}:
+                    result.append(" ")
+                    quote_char = char
+                else:
+                    result.append(char)
+                continue
+
+            if quote_char == "'":
+                if char == quote_char:
+                    result.append(" ")
+                    quote_char = None
+                else:
+                    result.append(" ")
+                continue
+
+            if char == "\\":
+                result.append(" ")
+                escaped = True
+            elif char == quote_char:
+                result.append(" ")
+                quote_char = None
+            else:
+                result.append(" ")
+
+        return "".join(result)
+
+    def _expand_bash_aliases(self, command: str) -> str:
+        root_work_dir = self._root_work_dir().resolve().as_posix()
+        default_sandbox = self._default_sandbox_dir().resolve().as_posix()
+
+        # Use simple string replacement instead of shlex parsing to preserve shell operators (pipes, redirects, etc.)
+        result = command
+
+        # Replace root/ paths at argument/token boundaries, preserving separators
+        # Match: ^root/ or <space>root/ or <operator>root/
+        result = re.sub(r'(^|\s|(?<=[|>&;"]))root/',
+                        r'\1' + root_work_dir + '/', result)
+
+        # Also handle: ^root or <space>root or <operator>root when followed by whitespace/operator/end
+        result = re.sub(
+            r'(^|\s|(?<=[|>&;"]))root(?=\s|$|[|>&;"])', r'\1' + root_work_dir, result)
+
+        # Replace .sandbox paths once, without re-matching the expanded absolute path.
+        result = re.sub(
+            r'(^|\s|(?<=[|>&;\"]))\.sandbox(?=\s|$|/|[|>&;\"])',
+            r'\1' + default_sandbox,
+            result,
+        )
+
+        return result
+
+    def _root_work_dir(self) -> Path:
+        configured = self._configured_sandbox_dir()
+        if configured is not None:
+            return configured
+        return self._project_root_dir()
+
+    def _extract_command_paths(self, command_name: str, args: list[str]) -> list[str]:
+        if command_name in {"echo", "pwd"}:
+            return []
+        return [arg for arg in args if arg and not arg.startswith("-")]
+
+    def _validate_bash_path(self, raw_path: str) -> tuple[bool, str]:
+        # Path validation now only checks for actual traversal segments.
+        if self._contains_path_traversal(raw_path, ignore_quoted=False):
+            return False, "unsafe token: .."
+        return True, ""
+
+    def _allowed_bash_dirs(self) -> list[Path]:
+        root_work_dir = self._root_work_dir()
+        root_work_dir.mkdir(parents=True, exist_ok=True)
+
+        default_dir = self._default_sandbox_dir()
+        default_dir.mkdir(parents=True, exist_ok=True)
+        allowed = [root_work_dir.resolve(), default_dir.resolve()]
+
+        configured = self._configured_sandbox_dir()
+        if configured is not None:
+            configured.mkdir(parents=True, exist_ok=True)
+            allowed.append(configured.resolve())
+
+        return allowed
+
+    def _configured_sandbox_dir(self) -> Path | None:
+        project_root = self._project_root_dir()
+        config = load_sandbox_config(project_root / "config" / "sandbox.yaml")
+        if not config.writable_dir:
+            return None
+
+        raw_path = config.writable_dir.strip()
+        if not raw_path:
+            return None
+
+        # Normalize path: remove leading / or \\ for consistent handling
+        if raw_path.startswith(("/", "\\")):
+            raw_path = raw_path.lstrip("/\\")
+
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        return candidate
+
+    def _run_bash_command(self, command: str) -> str:
+        ok, reason = self._validate_bash_command(command)
         if not ok:
             return (
-                "error: unsafe skill shell command "
-                f"({reason}). Use relative paths from skills root, such as "
-                "`Get-Content demo-user/demo-user-style/SKILL.md -Encoding UTF8`."
+                "error: unsafe bash command "
+                f"({reason}). Avoid '..' in paths."
             )
 
-        skills_root = self._skills_root_dir()
-        skills_root.mkdir(parents=True, exist_ok=True)
+        work_dir = self._root_work_dir()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        self._default_sandbox_dir().mkdir(parents=True, exist_ok=True)
 
-        if os.name == "nt":
-            powershell_prefix = (
-                "$OutputEncoding = [System.Text.Encoding]::UTF8; "
-                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-            )
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f"{powershell_prefix}& {{ {command} }}",
-            ]
-        else:
-            cmd = ["sh", "-lc", command]
+        # Explicitly prepend 'cd' to ensure correct working directory in all environments
+        # Some systems (WSL, login shells) may change cwd despite the cwd parameter
+        expanded_cmd = self._expand_bash_aliases(command)
+        work_dir_str = work_dir.resolve().as_posix()
+        full_command = f'cd "{work_dir_str}" && {expanded_cmd}'
+
+        cmd = ["bash", "-lc", full_command]
 
         result = subprocess.run(
             cmd,
-            cwd=skills_root,
+            cwd=work_dir,
             capture_output=True,
             text=True,
             timeout=15,
@@ -379,7 +451,15 @@ class ReActMemoryAgent:
             error_text = stderr or stdout or f"command failed with exit code {result.returncode}"
             return f"error: {error_text}"
 
-        return stdout[:8000] if stdout else "ok"
+        # Convert absolute paths in stdout back to root/ format for LLM.
+        output = stdout[:100000] if stdout else "ok"
+        return self._rewrite_output_paths(output, work_dir)
+
+    def _rewrite_output_paths(self, output: str, work_dir: Path) -> str:
+        """Rewrite absolute work_dir paths back to root/ format."""
+        work_dir_posix = work_dir.resolve().as_posix()
+        # Replace work_dir prefix with root/ in output.
+        return output.replace(work_dir_posix, "root")
 
     def _register_user_skills(self, toolkit: Toolkit) -> None:
         self._loaded_skills = []
@@ -544,8 +624,13 @@ class ReActMemoryAgent:
         return self._skills_root_dir() / "global" / "skills.yaml"
 
     def _skills_root_dir(self) -> Path:
-        project_root = Path(__file__).resolve().parents[2]
-        return project_root / "skills"
+        return self._default_sandbox_dir() / "skills"
+
+    def _project_root_dir(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _default_sandbox_dir(self) -> Path:
+        return self._project_root_dir() / ".sandbox"
 
     def _record_tool_trace(self, name: str, input_value: Any, output_value: Any) -> None:
         item = {
@@ -617,7 +702,7 @@ class ReActMemoryAgent:
         return (
             "你是一个带记忆的助手。你会优先遵守长期记忆中的稳定偏好。\n"
             "当用户信息有新增或变化时，你可以调用 remember_note。\n"
-            "默认只给你最近3轮 session 摘要；如果需要更早的 session 或 daily 历史，必须主动调用搜索工具检索。\n"
+            "默认只给你最近 session 上下文；如果需要更早的 session 或 daily 历史，必须主动调用搜索工具检索。\n"
             "工具使用总原则：优先调用工具，能调用工具就调用工具；只要工具可以提供事实依据，就必须先调用再回答。\n"
             "只有在工具确实无法解决问题时，才允许不调用工具并直接给出说明。\n"
             "禁止仅凭猜测回答可被工具验证的问题。\n"
@@ -626,11 +711,15 @@ class ReActMemoryAgent:
             "关键规则：remember_note 的 note 必须是 memory.md 的完整版本，不是增量补丁。\n"
             "你写入的完整版本必须保留旧信息（仍然有效的部分）并融合最新变化，避免只写最新一条导致旧特征丢失。\n"
             "如果某条旧偏好被新信息明确否定，要在完整版本中替换该条而不是并存冲突表述。\n\n"
-            "当需要读取或修改技能文件时，必须使用 skill_shell_command。\n"
-            "skill_shell_command 的边界：只能在 skills 根目录下执行；路径必须是相对路径；禁止绝对路径、..、管道、重定向和多命令拼接。\n"
-            "读取 demo-user-style 的正确示例：Get-Content demo-user/demo-user-style/SKILL.md -Encoding UTF8\n"
-            "写入技能文件也必须显式带 -Encoding UTF8，例如 Set-Content ... -Encoding UTF8。\n"
-            "不要把路径写成 skills/demo-user/...，因为工具的当前目录已经是 skills/。\n\n"
+            "当需要读取或修改技能文件时，必须使用 bash_command。\n"
+            "bash_command 在工作目录内执行；禁止使用 .. 进行路径遍历。\n"
+            "bash_command 输入不做字符数限制；输出最多保留100000字符。\n"
+            "读取文件时尽量不要一次读取大段内容，优先按需分段读取。\n"
+            "路径约定：\n"
+            "root/ 表示工作目录，例：cat root/README.md\n"
+            ".sandbox/ 表示项目根目录的 .sandbox 目录，例：cat .sandbox/skills/demo-user/SKILL.md\n"
+            "bash 的返回值中的绝对路径会被转换为 root/ 格式。\n"
+            "支持管道、重定向等标准 bash 语法。\n\n"
             f"当前用户ID: {self.user_id}\n\n"
             f"可用记忆上下文:\n{memory_context}"
         )

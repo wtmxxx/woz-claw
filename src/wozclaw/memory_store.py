@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -231,16 +232,22 @@ class MemoryStore:
         session_id: str,
         query: str,
         session_limit: int = 8,
+        session_token_budget: int = 2800,
         daily_limit: int = 10,
         long_term_top_k: int = 3,
     ) -> MemoryContext:
         all_session_messages = self.get_session_messages(user_id, session_id)
         all_daily_messages = self.get_daily_messages_by_date(
             user_id, datetime.now().date().isoformat())
-        if session_limit <= 0:
+        # Session context now defaults to token-budget selection (<3k tokens).
+        # Keep session_limit<=0 as an explicit opt-out for compatibility in tests/callers.
+        if session_limit <= 0 or session_token_budget <= 0:
             session_messages = []
         else:
-            session_messages = all_session_messages[-session_limit:]
+            session_messages = self._take_recent_messages_by_token_budget(
+                all_session_messages,
+                token_budget=session_token_budget,
+            )
         if daily_limit <= 0:
             daily_messages = []
         else:
@@ -274,6 +281,39 @@ class MemoryStore:
                 lines.append(f"{row['content']}")
 
         return "\n".join(lines)
+
+    def _take_recent_messages_by_token_budget(
+        self,
+        rows: list[dict[str, Any]],
+        token_budget: int,
+    ) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+
+        safe_budget = max(1, token_budget)
+        selected: list[dict[str, Any]] = []
+        used_tokens = 0
+
+        # Keep latest messages first under budget, then reverse back to chronological order.
+        for row in reversed(rows):
+            row_tokens = self._estimate_message_tokens(row)
+            if selected and used_tokens + row_tokens > safe_budget:
+                break
+            selected.append(row)
+            used_tokens += row_tokens
+
+        selected.reverse()
+        return selected
+
+    def _estimate_message_tokens(self, row: dict[str, Any]) -> int:
+        role = str(row.get("role", ""))
+        content = str(row.get("content", ""))
+        text = f"{role}: {content}"
+
+        # Rough multilingual estimate: Chinese chars are often ~1 token, other text ~4 chars/token.
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        other_chars = max(0, len(text) - chinese_chars)
+        return max(1, chinese_chars + math.ceil(other_chars / 4))
 
     def _message_payload(
         self,

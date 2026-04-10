@@ -22,6 +22,11 @@ class AgentRuntimeConfig:
     skill_template: str
 
 
+@dataclass
+class SandboxConfig:
+    writable_dir: str
+
+
 def load_llm_config(config_path: Path | str = "config/llm.yaml") -> LLMConfig:
     path = Path(config_path)
     data: dict[str, Any] = {}
@@ -75,4 +80,21 @@ def load_agent_runtime_config(config_path: Path | str = "config/agent.yaml") -> 
                 "- {name}({dir}): {description}",
             )
         ),
+    )
+
+
+def load_sandbox_config(config_path: Path | str = "config/sandbox.yaml") -> SandboxConfig:
+    path = Path(config_path)
+    data: dict[str, Any] = {}
+
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+
+    sandbox_data = data.get("sandbox", {}) if isinstance(
+        data.get("sandbox", {}), dict) else {}
+
+    return SandboxConfig(
+        writable_dir=str(sandbox_data.get("writable_dir", "")).strip(),
     )

@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from agent_memory_demo.agent import AgentResponse, ReActMemoryAgent, ConversationTitleGenerator
-from agent_memory_demo.memory_store import MemoryStore
+from wozclaw.agent import AgentResponse, ReActMemoryAgent, ConversationTitleGenerator
+from wozclaw.memory_store import MemoryStore
 
 
 @dataclass
@@ -40,7 +40,7 @@ class ChatService:
             user_id,
             session_id,
             query=message,
-            session_limit=6,
+            session_token_budget=2800,
             daily_limit=0,
         )
         prompt_context = self.memory_store.build_prompt_context(context)

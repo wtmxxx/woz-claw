@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="Black">
+    <option name="sdkName" value="uv (agent-memory-demo)" />
+  </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="uv (agent-memory-demo)" project-jdk-type="Python SDK" />
 </project>

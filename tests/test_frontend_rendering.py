@@ -2,14 +2,14 @@ from pathlib import Path
 
 
 def test_frontend_does_not_render_memory_hits_hint() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "memory_hits:" not in html
 
 
 def test_frontend_layout_is_not_centered_container() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "justify-content: center;" not in html
@@ -17,21 +17,21 @@ def test_frontend_layout_is_not_centered_container() -> None:
 
 
 def test_frontend_messages_have_horizontal_margin() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "margin-inline:" in html
 
 
 def test_frontend_messages_use_readable_sans_font() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "font-family: \"PingFang SC\", \"Hiragino Sans GB\", \"Source Han Sans SC\", \"Microsoft YaHei UI\", sans-serif;" in html
 
 
 def test_frontend_has_global_ui_scale() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "--ui-scale: 1.15;" in html
@@ -41,7 +41,7 @@ def test_frontend_has_global_ui_scale() -> None:
 
 
 def test_frontend_has_tool_call_rendering() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "tool_calls" in html
@@ -51,7 +51,7 @@ def test_frontend_has_tool_call_rendering() -> None:
 
 
 def test_frontend_tool_calls_are_collapsible_and_above_ai_message() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "createElement('details')" in html
@@ -60,7 +60,7 @@ def test_frontend_tool_calls_are_collapsible_and_above_ai_message() -> None:
 
 
 def test_frontend_history_load_uses_persisted_tool_calls() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "item.tool_calls || []" in html
@@ -69,14 +69,14 @@ def test_frontend_history_load_uses_persisted_tool_calls() -> None:
 
 
 def test_frontend_tool_calls_have_visible_separator_between_items() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert "lines.push('--------------------');" in html
 
 
 def test_frontend_tool_trace_left_aligns_with_assistant_message() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     assert ".assistant-block .msg {" in html
@@ -84,7 +84,7 @@ def test_frontend_tool_trace_left_aligns_with_assistant_message() -> None:
 
 
 def test_frontend_sidebar_has_reserved_bottom_space_with_scrollbar() -> None:
-    html_path = Path("src/agent_memory_demo/static/index.html")
+    html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
     sidebar_start = html.index(".sidebar {")

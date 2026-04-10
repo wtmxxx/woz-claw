@@ -8,8 +8,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent_memory_demo.memory_store import MemoryStore
-from agent_memory_demo.service import ChatService
+from wozclaw.memory_store import MemoryStore
+from wozclaw.service import ChatService
 
 
 class ChatRequest(BaseModel):
@@ -22,7 +22,7 @@ class CreateConversationRequest(BaseModel):
     user_id: str
 
 
-app = FastAPI(title="Agent Memory Demo")
+app = FastAPI(title="WozClaw")
 
 memory_store = MemoryStore(root_dir=Path("memory"))
 chat_service = ChatService(memory_store=memory_store)

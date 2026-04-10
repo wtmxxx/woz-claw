@@ -1,4 +1,4 @@
-# Agent Memory Demo AgentScope Migration Design
+# WozClaw AgentScope Migration Design
 
 ## 1. Goal
 在不改变现有业务设计逻辑的前提下，将项目中的 Agent 运行时统一为 AgentScope。
@@ -11,7 +11,7 @@
 
 ## 3. Scope
 ### In Scope
-- 统一 `src/agent_memory_demo/agent.py` 为 AgentScope 运行时实现。
+- 统一 `src/wozclaw/agent.py` 为 AgentScope 运行时实现。
 - 统一会话标题生成为 AgentScope 模型调用实现。
 - 统一依赖声明为 AgentScope 技术栈。
 - 必要的测试适配与新增回归测试。
