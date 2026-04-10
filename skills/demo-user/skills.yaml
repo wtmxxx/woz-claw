@@ -1,0 +1,7 @@
+﻿skills:
+  - name: memory-tools
+    enabled: true
+  - name: reply-style
+    enabled: true
+  - name: cooking-skill
+    enabled: true

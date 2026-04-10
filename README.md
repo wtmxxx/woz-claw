@@ -3,7 +3,7 @@
 一个最小可运行、可观察、可验证的记忆型 Agent Demo。
 
 技术栈：
-- LangChain + LangGraph ReAct Agent
+- AgentScope ReAct Agent
 - 文件系统 Memory Store（长期 / 会话 / 每日 / 日志）
 - FastAPI + 前端单页聊天界面
 
@@ -37,6 +37,63 @@ memory/
 - 会话记忆（`sessions/*.jsonl`）：当前对话线程上下文。
 - 每日记忆（`daily/*.jsonl`）：跨会话的当天信息聚合。
 - 日志（`logs/llm_dialogue.jsonl`）：可追溯审计，记录每轮输入、上下文、输出、工具轨迹。
+
+### 1.1 全局与用户技能配置（skills.yaml）
+
+Agent 支持全局技能与按用户技能两层配置：
+
+```text
+skills/global/skills.yaml       # 全局默认技能
+skills/{user_id}/skills.yaml    # 用户覆盖配置
+```
+
+全局示例（`skills/global/skills.yaml`）：
+
+```yaml
+skills:
+  - name: memory-tools
+    enabled: true
+```
+
+用户示例（`skills/{user_id}/skills.yaml`）：
+
+```yaml
+skills:
+  - name: memory-tools
+    enabled: false
+  - name: planner
+    enabled: true
+```
+
+规则：
+- 全局配置与用户配置会合并；同名技能下，用户配置优先。
+- 最终仅加载 `enabled: true` 的技能。
+- 全局技能目录：`skills/global/{name}/SKILL.md`。
+- 用户技能目录：`skills/{user_id}/{name}/SKILL.md`。
+- 技能目录中必须存在 `SKILL.md` 才会加载。
+- 文件不存在或格式错误时会自动降级为“不加载任何技能”，不影响聊天主流程。
+
+### 1.2 技能文件 Shell 工具边界
+
+Agent 提供 `skill_shell_command` 用于读取/修改技能目录下文件。此工具是受限 shell：
+
+- 工作目录固定为项目的 `skills/` 根目录。
+- 只能使用相对路径（相对于 `skills/`）。
+- 禁止绝对路径、`..`、管道、重定向、多命令拼接、环境变量访问。
+
+常用正确示例（Windows）：
+
+```powershell
+Get-ChildItem demo-user
+Get-Content demo-user/demo-user-style/SKILL.md
+Set-Content demo-user/demo-user-style/SKILL.md -Value "..."
+```
+
+错误示例：
+
+- `Get-Content skills/demo-user/demo-user-style/SKILL.md`（重复写了 `skills/` 前缀）
+- `Get-Content ../skills/demo-user/demo-user-style/SKILL.md`（包含 `..`）
+- `Get-Content demo-user/demo-user-style/SKILL.md ; Get-ChildItem`（多命令）
 
 ### 2. 统一消息结构
 
@@ -158,7 +215,7 @@ llm:
 3. 启动服务
 
 ```bash
-uvicorn agent_memory_demo.app:app --reload
+python -m uvicorn agent_memory_demo.app:app --reload
 ```
 
 4. 打开页面

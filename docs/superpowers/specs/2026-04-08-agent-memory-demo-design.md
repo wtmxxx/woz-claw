@@ -4,7 +4,7 @@
 构建一个最小可运行的对话 Agent Demo，支持文件系统记忆，能记住用户长期偏好、会话短期上下文和每日记忆，并通过前端页面交互验证效果。
 
 ## 2. 范围
-- 使用 LangChain + LangGraph 搭建最小 ReAct Agent。
+- 使用 AgentScope 搭建最小 ReAct Agent。
 - 文件系统记忆目录按用户隔离。
 - 提供后端 API 与简易前端。
 - 提供最基础测试覆盖核心记忆行为。
@@ -35,11 +35,11 @@
 3. 合并去重后组装成 agent 上下文。
 
 ## 5. Agent 设计
-- 主体：LangGraph 的 create_react_agent。
+- 主体：AgentScope 的 ReActAgent。
 - Tool:
   - remember_note(note, tags): 将长期记忆写入 long_term.jsonl。
 - Model:
-  - 默认使用 ChatOpenAI（需 OPENAI_API_KEY）。
+  - 默认使用 AgentScope 的 OpenAIChatModel（需 OPENAI_API_KEY）。
   - 若缺少 key，回退到规则回复，保证 demo 可运行。
 
 ## 6. API 设计

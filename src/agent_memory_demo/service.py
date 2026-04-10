@@ -14,6 +14,8 @@ class ChatResult:
     memory_hits: int
     title: str
     tool_calls: list[dict[str, str]] = field(default_factory=list)
+    loaded_skills: list[dict[str, str]] = field(default_factory=list)
+    activity_traces: list[dict[str, str]] = field(default_factory=list)
 
 
 class ChatService:
@@ -56,11 +58,23 @@ class ChatService:
                 agent_result = raw_result
             else:
                 agent_result = AgentResponse(
-                    text=str(raw_result), tool_calls=[])
+                    text=str(raw_result),
+                    tool_calls=[],
+                    loaded_skills=[],
+                    activity_traces=[],
+                )
 
         reply = agent_result.text
         tool_calls = agent_result.tool_calls
-        assistant_meta = {"tool_calls": tool_calls} if tool_calls else {}
+        loaded_skills = agent_result.loaded_skills
+        activity_traces = agent_result.activity_traces
+        assistant_meta: dict[str, Any] = {}
+        if tool_calls:
+            assistant_meta["tool_calls"] = tool_calls
+        if loaded_skills:
+            assistant_meta["loaded_skills"] = loaded_skills
+        if activity_traces:
+            assistant_meta["activity_traces"] = activity_traces
 
         self.memory_store.append_session_message(
             user_id, session_id, "assistant", reply, meta=assistant_meta)
@@ -95,6 +109,8 @@ class ChatService:
             memory_hits=len(context.long_term_hits),
             title=title,
             tool_calls=tool_calls,
+            loaded_skills=loaded_skills,
+            activity_traces=activity_traces,
         )
 
     def create_conversation(self, user_id: str) -> str:
@@ -126,6 +142,39 @@ class ChatService:
                         }
                     )
 
+            raw_loaded_skills = meta.get(
+                "loaded_skills") if isinstance(meta, dict) else []
+            loaded_skills: list[dict[str, str]] = []
+            if isinstance(raw_loaded_skills, list):
+                for item in raw_loaded_skills:
+                    if not isinstance(item, dict):
+                        continue
+                    loaded_skills.append(
+                        {
+                            "name": str(item.get("name", "")),
+                            "source": str(item.get("source", "")),
+                            "dir": str(item.get("dir", "")),
+                        }
+                    )
+
+            raw_activity_traces = meta.get(
+                "activity_traces") if isinstance(meta, dict) else []
+            activity_traces: list[dict[str, str]] = []
+            if isinstance(raw_activity_traces, list):
+                for item in raw_activity_traces:
+                    if not isinstance(item, dict):
+                        continue
+                    activity_traces.append(
+                        {
+                            "type": str(item.get("type", "")),
+                            "name": str(item.get("name", "")),
+                            "source": str(item.get("source", "")),
+                            "dir": str(item.get("dir", "")),
+                            "input": str(item.get("input", "")),
+                            "output": str(item.get("output", "")),
+                        }
+                    )
+
             result.append(
                 {
                     "ts": str(row.get("ts", "")),
@@ -133,6 +182,8 @@ class ChatService:
                     "content": str(row.get("content", "")),
                     "message_id": int(row.get("message_id", 0)) if str(row.get("message_id", "")).isdigit() else 0,
                     "tool_calls": tool_calls,
+                    "loaded_skills": loaded_skills,
+                    "activity_traces": activity_traces,
                 }
             )
         return result

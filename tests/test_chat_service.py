@@ -27,12 +27,37 @@ class DummyToolAgent:
         _ = memory_context
         return AgentResponse(
             text="tool-answer",
+            loaded_skills=[
+                {
+                    "name": "memory-tools",
+                    "source": "global",
+                    "dir": "skills/global/memory-tools",
+                }
+            ],
             tool_calls=[
                 {
                     "name": "search_daily",
                     "input": "蓝莓",
                     "output": "#1 ...",
                 }
+            ],
+            activity_traces=[
+                {
+                    "type": "skill",
+                    "name": "memory-tools",
+                    "source": "global",
+                    "dir": "skills/global/memory-tools",
+                    "input": "",
+                    "output": "loaded",
+                },
+                {
+                    "type": "tool",
+                    "name": "search_daily",
+                    "source": "",
+                    "dir": "",
+                    "input": "蓝莓",
+                    "output": "#1 ...",
+                },
             ],
         )
 
@@ -109,10 +134,18 @@ def test_chat_service_exposes_tool_calls_for_ui(tmp_path: Path) -> None:
     assert response.reply == "tool-answer"
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0]["name"] == "search_daily"
+    assert len(response.loaded_skills) == 1
+    assert response.loaded_skills[0]["name"] == "memory-tools"
+    assert len(response.activity_traces) == 2
+    assert response.activity_traces[0]["type"] == "skill"
+    assert response.activity_traces[1]["type"] == "tool"
 
     messages = service.get_session_messages("u4", "s4")
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["tool_calls"][0]["name"] == "search_daily"
+    assert messages[-1]["loaded_skills"][0]["name"] == "memory-tools"
+    assert messages[-1]["activity_traces"][0]["type"] == "skill"
+    assert messages[-1]["activity_traces"][1]["type"] == "tool"
 
 
 def test_conversation_list_orders_by_latest_chat_time(tmp_path: Path) -> None:

@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 构建一个可运行的文件系统 memory + LangGraph ReAct agent + 前端交互 demo。
+**Goal:** 构建一个可运行的文件系统 memory + AgentScope ReAct agent + 前端交互 demo。
 
 **Architecture:** FastAPI 提供 API 与静态页面；MemoryStore 负责按 user/session/day 写读文件；ChatService 组合记忆上下文并驱动 agent；agent 支持 OpenAI 模型与无 key 回退。
 
-**Tech Stack:** Python 3.11+, FastAPI, LangChain, LangGraph, pytest
+**Tech Stack:** Python 3.11+, FastAPI, AgentScope, pytest
 
 ---
 

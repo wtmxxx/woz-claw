@@ -148,19 +148,20 @@ def test_memory_store_search_helpers_for_llm_tools(tmp_path: Path) -> None:
 
 def test_daily_message_window_uses_per_day_anchor_and_legacy_rows(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
-    daily_file = tmp_path / "u10" / "daily" / "2026-04-08.jsonl"
+    day = datetime.now().date().isoformat()
+    daily_file = tmp_path / "u10" / "daily" / f"{day}.jsonl"
     daily_file.parent.mkdir(parents=True, exist_ok=True)
     daily_file.write_text(
-        '{"ts":"2026-04-08T09:00:00","role":"user","content":"早上计划","tags":["daily"],"meta":{}}\n'
-        '{"ts":"2026-04-08T09:05:00","role":"assistant","content":"确认安排","tags":["daily"],"meta":{}}\n',
+        f'{{"ts":"{day}T09:00:00","role":"user","content":"早上计划","tags":["daily"],"meta":{{}}}}\n'
+        f'{{"ts":"{day}T09:05:00","role":"assistant","content":"确认安排","tags":["daily"],"meta":{{}}}}\n',
         encoding="utf-8",
     )
 
-    rows = store.get_daily_messages_by_date("u10", "2026-04-08")
+    rows = store.get_daily_messages_by_date("u10", day)
     assert [row["message_id"] for row in rows] == [1, 2]
 
     store.append_daily_message("u10", "user", "下午再聊")
-    updated_rows = store.get_daily_messages_by_date("u10", "2026-04-08")
+    updated_rows = store.get_daily_messages_by_date("u10", day)
     assert [row["message_id"] for row in updated_rows] == [1, 2, 3]
 
     window = store.get_daily_messages_window(
@@ -168,7 +169,7 @@ def test_daily_message_window_uses_per_day_anchor_and_legacy_rows(tmp_path: Path
         message_id=2,
         before=1,
         after=1,
-        day="2026-04-08",
+        day=day,
     )
     assert [row["content"] for row in window] == ["早上计划", "确认安排", "下午再聊"]
 

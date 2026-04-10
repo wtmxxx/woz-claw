@@ -52,9 +52,10 @@
             padding: 16px;
             border-right: 1px solid var(--line);
             display: grid;
-            grid-template-rows: auto auto 1fr;
+            grid-template-rows: auto auto minmax(0, 1fr) 75px;
             gap: 12px;
             background: linear-gradient(120deg, #fff6e9, #eafaf7);
+            min-height: 0;
         }
 
         .main {
@@ -129,6 +130,14 @@
             display: grid;
             gap: 8px;
             align-content: start;
+            min-height: 0;
+        }
+
+        .sidebar-footer {
+            min-height: 75px;
+            border-top: 1px dashed rgba(17, 68, 63, 0.14);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.18);
         }
 
         .conv-item {
@@ -336,6 +345,7 @@
                 <button id="newConversationBtn" class="new-btn" type="button">+ 新建对话</button>
             </div>
             <div id="conversationList" class="conv-list"></div>
+            <div class="sidebar-footer"></div>
         </aside>
 
         <section class="main">
@@ -366,22 +376,70 @@
         let currentSessionId = null;
         let conversations = [];
 
-        function formatToolCalls(toolCalls) {
-            if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+        function buildLegacyActivityTraces(toolCalls = [], loadedSkills = []) {
+            const traces = [];
+
+            if (Array.isArray(loadedSkills)) {
+                loadedSkills.forEach((skill) => {
+                    traces.push({
+                        type: 'skill',
+                        name: String(skill?.name || 'skill'),
+                        source: String(skill?.source || ''),
+                        dir: String(skill?.dir || ''),
+                        input: '',
+                        output: 'loaded',
+                    });
+                });
+            }
+
+            if (Array.isArray(toolCalls)) {
+                toolCalls.forEach((call) => {
+                    traces.push({
+                        type: 'tool',
+                        name: String(call?.name || 'tool'),
+                        source: '',
+                        dir: '',
+                        input: String(call?.input || ''),
+                        output: String(call?.output || ''),
+                    });
+                });
+            }
+
+            return traces;
+        }
+
+        function formatActivityTraces(activityTraces = [], toolCalls = [], loadedSkills = []) {
+            const traces = Array.isArray(activityTraces) && activityTraces.length > 0
+                ? activityTraces
+                : buildLegacyActivityTraces(toolCalls, loadedSkills);
+
+            if (traces.length === 0) {
                 return '';
             }
 
-            const lines = ['### 工具调用'];
-            toolCalls.forEach((call, idx) => {
-                const name = String(call?.name || 'tool');
-                const input = String(call?.input || '');
-                const output = String(call?.output || '');
+            const lines = ['### 调用轨迹（按时间顺序）'];
+            traces.forEach((item, idx) => {
+                const type = String(item?.type || 'tool');
+                const name = String(item?.name || (type === 'skill' ? 'skill' : 'tool'));
+                const source = String(item?.source || '');
+                const dir = String(item?.dir || '');
+                const input = String(item?.input || '');
+                const output = String(item?.output || '');
 
                 if (idx > 0) {
                     lines.push('--------------------');
                 }
 
-                lines.push(`${idx + 1}. ${name}`);
+                const typeLabel = type === 'skill' ? '技能' : '工具';
+                lines.push(`${idx + 1}. [${typeLabel}] ${name}`);
+                if (type === 'skill') {
+                    if (source) {
+                        lines.push(`- 来源: ${source}`);
+                    }
+                    if (dir) {
+                        lines.push(`- 目录: ${dir}`);
+                    }
+                }
                 if (input) {
                     lines.push(`- 输入: ${input}`);
                 }
@@ -393,21 +451,24 @@
             return lines.join('\n');
         }
 
-        function addAssistantMsg(text, toolCalls = []) {
+        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = []) {
             const block = document.createElement('div');
             block.className = 'assistant-block';
 
-            const toolCallText = formatToolCalls(toolCalls);
-            if (toolCallText) {
+            const activityTraceText = formatActivityTraces(activityTraces, toolCalls, loadedSkills);
+            if (activityTraceText) {
                 const details = document.createElement('details');
                 details.className = 'tool-trace';
                 details.open = false;
 
                 const summary = document.createElement('summary');
-                summary.textContent = `工具调用 (${toolCalls.length})`;
+                const activityItems = (Array.isArray(activityTraces) && activityTraces.length > 0)
+                    ? activityTraces
+                    : buildLegacyActivityTraces(toolCalls, loadedSkills);
+                summary.textContent = `调用轨迹 (${activityItems.length})`;
 
                 const pre = document.createElement('pre');
-                pre.textContent = toolCallText;
+                pre.textContent = activityTraceText;
 
                 details.appendChild(summary);
                 details.appendChild(pre);
@@ -489,7 +550,12 @@
             clearMessages();
             (data.items || []).forEach((item) => {
                 if (item.role === 'assistant') {
-                    addAssistantMsg(item.content, item.tool_calls || []);
+                    addAssistantMsg(
+                        item.content,
+                        item.tool_calls || [],
+                        item.loaded_skills || [],
+                        item.activity_traces || [],
+                    );
                 } else {
                     addMsg('u', item.content, false);
                 }
@@ -543,7 +609,12 @@
                     return;
                 }
 
-                addAssistantMsg(`${data.reply}`, data.tool_calls || []);
+                addAssistantMsg(
+                    `${data.reply}`,
+                    data.tool_calls || [],
+                    data.loaded_skills || [],
+                    data.activity_traces || [],
+                );
                 if (data.title) {
                     currentTitleEl.textContent = data.title;
                 }

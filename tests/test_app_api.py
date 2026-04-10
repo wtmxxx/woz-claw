@@ -46,6 +46,14 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
             title="标题",
             tool_calls=[{"name": "search_session",
                          "input": "秘密", "output": "#3 ..."}],
+            loaded_skills=[
+                {"name": "memory-tools", "source": "global", "dir": "skills/global/memory-tools"}],
+            activity_traces=[
+                {"type": "skill", "name": "memory-tools", "source": "global",
+                    "dir": "skills/global/memory-tools", "input": "", "output": "loaded"},
+                {"type": "tool", "name": "search_session", "source": "",
+                    "dir": "", "input": "秘密", "output": "#3 ..."},
+            ],
         )
 
     monkeypatch.setattr(app_module.chat_service, "chat", fake_chat)
@@ -58,6 +66,9 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["tool_calls"][0]["name"] == "search_session"
+    assert payload["loaded_skills"][0]["name"] == "memory-tools"
+    assert payload["activity_traces"][0]["type"] == "skill"
+    assert payload["activity_traces"][1]["type"] == "tool"
 
 
 def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
@@ -79,6 +90,31 @@ def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
                         "output": "#2 ...",
                     }
                 ],
+                "loaded_skills": [
+                    {
+                        "name": "memory-tools",
+                        "source": "global",
+                        "dir": "skills/global/memory-tools",
+                    }
+                ],
+                "activity_traces": [
+                    {
+                        "type": "skill",
+                        "name": "memory-tools",
+                        "source": "global",
+                        "dir": "skills/global/memory-tools",
+                        "input": "",
+                        "output": "loaded",
+                    },
+                    {
+                        "type": "tool",
+                        "name": "search_session",
+                        "source": "",
+                        "dir": "",
+                        "input": "关键字",
+                        "output": "#2 ...",
+                    },
+                ],
             }
         ]
 
@@ -94,3 +130,5 @@ def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["items"][0]["tool_calls"][0]["name"] == "search_session"
+    assert payload["items"][0]["loaded_skills"][0]["name"] == "memory-tools"
+    assert payload["items"][0]["activity_traces"][0]["type"] == "skill"

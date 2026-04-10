@@ -51,6 +51,8 @@ def chat_api(req: ChatRequest) -> dict[str, Any]:
         "memory_hits": result.memory_hits,
         "title": result.title,
         "tool_calls": result.tool_calls,
+        "loaded_skills": result.loaded_skills,
+        "activity_traces": result.activity_traces,
     }
 
 
