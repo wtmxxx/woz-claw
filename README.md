@@ -1,6 +1,6 @@
 # WozClaw
 
-一个最小可运行、可观察、可验证的记忆型 Agent Demo。
+一个最小可运行、可观察、可验证的记忆型 Agent。
 
 技术栈：
 - AgentScope ReAct Agent
