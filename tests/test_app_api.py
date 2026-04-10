@@ -1,7 +1,11 @@
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
+from pathlib import Path
+
+import yaml
 
 from wozclaw import app as app_module
+from wozclaw.memory_store import MemoryStore
 
 
 def test_get_conversation_messages_accepts_numeric_message_id(monkeypatch) -> None:
@@ -132,3 +136,77 @@ def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
     assert payload["items"][0]["tool_calls"][0]["name"] == "search_session"
     assert payload["items"][0]["loaded_skills"][0]["name"] == "memory-tools"
     assert payload["items"][0]["activity_traces"][0]["type"] == "skill"
+
+
+def test_get_settings_returns_long_term_memory_and_skill_toggles(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    skills_root = tmp_path / "skills"
+    monkeypatch.setattr(app_module, "_skills_root_dir", lambda: skills_root)
+    client = TestClient(app_module.app)
+
+    app_module.memory_store = MemoryStore(root_dir=tmp_path)
+    app_module.memory_store.set_long_term_memory("u1", "用户偏好中文")
+
+    user_skill_dir = skills_root / "u1"
+    user_skill_dir.mkdir(parents=True, exist_ok=True)
+    (user_skill_dir / "skills.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "skills": [
+                    {"name": "memory-tools", "enabled": False},
+                    {"name": "weather", "enabled": True},
+                ]
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/settings", params={"user_id": "u1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["long_term_memory"] == "用户偏好中文"
+    assert payload["skills"][0] == {"name": "memory-tools", "enabled": False}
+    assert payload["skills"][1] == {"name": "weather", "enabled": True}
+
+
+def test_put_settings_updates_long_term_memory_and_skill_toggles(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    skills_root = tmp_path / "skills"
+    monkeypatch.setattr(app_module, "_skills_root_dir", lambda: skills_root)
+    client = TestClient(app_module.app)
+
+    app_module.memory_store = MemoryStore(root_dir=tmp_path)
+
+    response = client.put(
+        "/api/settings",
+        json={
+            "user_id": "u2",
+            "long_term_memory": "长期记忆\n- 喜欢游泳",
+            "skills": [
+                {"name": "memory-tools", "enabled": True},
+                {"name": "reply-style", "enabled": False},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+
+    assert app_module.memory_store.get_long_term_memory("u2") == "长期记忆\n- 喜欢游泳"
+
+    skills_yaml = skills_root / "u2" / "skills.yaml"
+    parsed = yaml.safe_load(skills_yaml.read_text(encoding="utf-8"))
+    assert parsed == {
+        "skills": [
+            {"name": "memory-tools", "enabled": True},
+            {"name": "reply-style", "enabled": False},
+        ]
+    }

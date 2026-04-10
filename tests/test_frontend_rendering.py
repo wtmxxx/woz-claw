@@ -40,6 +40,65 @@ def test_frontend_has_global_ui_scale() -> None:
     assert "height: calc(100vh / var(--ui-scale));" in html
 
 
+def test_frontend_locks_root_scroll_container() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "html," in html
+    assert "width: 100%;" in html
+    assert "height: 100%;" in html
+    assert "overflow: hidden;" in html
+
+
+def test_frontend_resets_scroll_on_refresh() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "history.scrollRestoration = 'manual';" in html
+    assert "window.scrollTo(0, 0);" in html
+    assert "requestAnimationFrame(() => {" in html
+    assert "window.addEventListener('pageshow', scheduleScrollReset);" in html
+    assert "window.addEventListener('load', scheduleScrollReset);" in html
+    assert "window.addEventListener('beforeunload', resetPageScroll);" in html
+
+
+def test_frontend_app_is_pinned_to_top_left_viewport() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert ".app {" in html
+    assert "position: fixed;" in html
+    assert "top: 0;" in html
+    assert "left: 0;" in html
+
+
+def test_frontend_composer_uses_fixed_bar_height() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    composer_start = html.index(".composer {")
+    composer_end = html.index("}", composer_start)
+    composer_block = html[composer_start:composer_end]
+
+    composer_input_start = html.index(".composer input {")
+    composer_input_end = html.index("}", composer_input_start)
+    composer_input_block = html[composer_input_start:composer_input_end]
+
+    assert "height: var(--composer-bar-height);" in composer_block
+    assert "height: 44px;" in composer_input_block
+
+
+def test_frontend_sidebar_has_no_bottom_padding_for_footer_alignment() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    sidebar_start = html.index(".sidebar {")
+    sidebar_end = html.index("}", sidebar_start)
+    sidebar_block = html[sidebar_start:sidebar_end]
+
+    assert "padding: 18px 18px 0;" in sidebar_block
+
+
 def test_frontend_has_tool_call_rendering() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
@@ -87,6 +146,10 @@ def test_frontend_sidebar_has_reserved_bottom_space_with_scrollbar() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
 
+    root_start = html.index(":root {")
+    root_end = html.index("}", root_start)
+    root_block = html[root_start:root_end]
+
     sidebar_start = html.index(".sidebar {")
     sidebar_end = html.index("}", sidebar_start)
     sidebar_block = html[sidebar_start:sidebar_end]
@@ -95,7 +158,97 @@ def test_frontend_sidebar_has_reserved_bottom_space_with_scrollbar() -> None:
     conv_end = html.index("}", conv_start)
     conv_list_block = html[conv_start:conv_end]
 
-    assert "grid-template-rows: auto auto minmax(0, 1fr) 75px;" in sidebar_block
+    assert "--composer-bar-height: 64px;" in root_block
+    assert "grid-template-rows: auto auto minmax(0, 1fr) var(--composer-bar-height);" in sidebar_block
     assert "overflow: auto;" in conv_list_block
     assert ".sidebar-footer {" in html
-    assert "height: 75px;" in html
+    assert "height: var(--composer-bar-height);" in html
+
+
+def test_frontend_includes_favicon_icon() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert 'rel="icon"' in html
+    assert "https://www.wotemo.com/img/WotemoRoundCorner.png" in html
+
+
+def test_frontend_has_bottom_left_settings_and_user_profile() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert 'id="openSettingsBtn"' in html
+    assert 'id="userProfile"' in html
+    assert 'id="userAvatar"' in html
+    assert 'id="userNameLabel"' in html
+
+
+def test_frontend_new_conversation_button_uses_dedicated_style_class() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    btn_start = html.index(".new-conv-btn {")
+    btn_end = html.index("}", btn_start)
+    btn_block = html[btn_start:btn_end]
+
+    assert 'id="newConversationBtn" class="new-btn new-conv-btn' in html
+    assert ".new-conv-btn {" in html
+    assert "box-shadow: none;" in btn_block
+    assert "background: #fff;" in btn_block
+    assert "color: #1f56d8;" in btn_block
+
+
+def test_frontend_settings_button_is_semi_iconized() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert 'id="openSettingsBtn"' in html
+    assert "settings-btn-icon" in html
+    assert "settings-btn-label" in html
+    assert "⚙" in html
+    assert "gap: 3px;" in html
+    assert ".settings-btn-icon {" in html
+    assert "font-size: 13px;" in html
+
+
+def test_frontend_has_settings_view_for_memory_and_skills() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert 'id="settingsView"' in html
+    assert 'id="longTermMemory"' in html
+    assert 'id="skillsList"' in html
+    assert 'id="saveSettingsBtn"' in html
+    assert 'id="backToChatBtn"' in html
+
+
+def test_frontend_memory_textarea_uses_full_panel_height_layout() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "grid-template-rows: 1fr;" in html
+    assert "#settingsPanelMemory {" in html
+    assert "#settingsPanelMemory .settings-group {" in html
+    assert "#longTermMemory {" in html
+    assert "height: 100%;" in html
+
+
+def test_frontend_settings_panel_wrap_keeps_scroll_for_skills() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    panel_wrap_start = html.index(".settings-panel-wrap {")
+    panel_wrap_end = html.index("}", panel_wrap_start)
+    panel_wrap_block = html[panel_wrap_start:panel_wrap_end]
+
+    assert "overflow: auto;" in panel_wrap_block
+
+
+def test_frontend_avatar_uses_initials_of_each_word() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "function getUserInitials" in html
+    assert "replace(/([a-z])([A-Z])/g, '$1 $2')" in html
+    assert "split(/[^a-zA-Z0-9]+/)" in html
+    assert "slice(0, 2)" in html
