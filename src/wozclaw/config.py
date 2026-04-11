@@ -23,8 +23,9 @@ class AgentRuntimeConfig:
 
 
 @dataclass
-class SandboxConfig:
-    writable_dir: str
+class WorkDirConfig:
+    workdir: str
+    wozclaw_dir: str
 
 
 def load_llm_config(config_path: Path | str = "config/llm.yaml") -> LLMConfig:
@@ -83,7 +84,7 @@ def load_agent_runtime_config(config_path: Path | str = "config/agent.yaml") -> 
     )
 
 
-def load_sandbox_config(config_path: Path | str = "config/sandbox.yaml") -> SandboxConfig:
+def load_path_config(config_path: Path | str = "config/path.yaml") -> WorkDirConfig:
     path = Path(config_path)
     data: dict[str, Any] = {}
 
@@ -92,9 +93,42 @@ def load_sandbox_config(config_path: Path | str = "config/sandbox.yaml") -> Sand
         if isinstance(loaded, dict):
             data = loaded
 
-    sandbox_data = data.get("sandbox", {}) if isinstance(
-        data.get("sandbox", {}), dict) else {}
+    path_data = data.get("path", {}) if isinstance(
+        data.get("path", {}), dict) else {}
 
-    return SandboxConfig(
-        writable_dir=str(sandbox_data.get("writable_dir", "")).strip(),
+    resolved_path = path.resolve()
+    if resolved_path.parent.name.lower() == "config":
+        project_root = resolved_path.parent.parent
+    else:
+        project_root = resolved_path.parent
+
+    def resolve_path(raw_value: Any, default_value: str = "") -> str:
+        text = str(raw_value if raw_value is not None else default_value).strip()
+        if not text:
+            return ""
+
+        candidate = Path(text)
+        if candidate.is_absolute():
+            return str(candidate.resolve())
+        return str((project_root / candidate).resolve())
+
+    return WorkDirConfig(
+        workdir=resolve_path(
+            path_data.get(
+                "workdir",
+                path_data.get("writable_dir", ""),
+            )
+        ),
+        wozclaw_dir=resolve_path(
+            path_data.get(
+                "wozclaw_dir",
+                path_data.get("wozclaw", ".wozclaw"),
+            ),
+            default_value=".wozclaw",
+        ),
     )
+
+
+def load_work_dir_config(config_path: Path | str = "config/path.yaml") -> WorkDirConfig:
+    """Backward-compatible alias for older call sites."""
+    return load_path_config(config_path)

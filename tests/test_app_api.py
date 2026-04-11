@@ -42,10 +42,11 @@ def test_get_conversation_messages_accepts_numeric_message_id(monkeypatch) -> No
 def test_chat_api_returns_tool_calls(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str):
+    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
         _ = user_id
         _ = session_id
         _ = message
+        _ = llm_user_message
         return SimpleNamespace(
             reply="ok",
             memory_hits=1,
@@ -84,10 +85,11 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
 def test_chat_api_returns_approval_request(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str):
+    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
         _ = user_id
         _ = session_id
         _ = message
+        _ = llm_user_message
         return SimpleNamespace(
             reply="等待审批",
             memory_hits=0,
@@ -120,10 +122,11 @@ def test_chat_api_returns_approval_request(monkeypatch) -> None:
 def test_chat_api_returns_choice_request(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str):
+    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
         _ = user_id
         _ = session_id
         _ = message
+        _ = llm_user_message
         return SimpleNamespace(
             reply="我有点拿不准",
             memory_hits=0,
@@ -167,10 +170,12 @@ def test_submit_choice_accepts_custom_input(monkeypatch, tmp_path: Path) -> None
 
     captured: dict[str, str] = {}
 
-    def fake_chat(user_id: str, session_id: str, message: str):
+    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None, use_latest_session_memory: bool = False):
         captured["user_id"] = user_id
         captured["session_id"] = session_id
         captured["message"] = message
+        captured["llm_user_message"] = llm_user_message or ""
+        captured["use_latest_session_memory"] = str(use_latest_session_memory)
         return SimpleNamespace(
             reply="收到你的选择",
             memory_hits=0,
@@ -205,6 +210,8 @@ def test_submit_choice_accepts_custom_input(monkeypatch, tmp_path: Path) -> None
     assert captured["user_id"] == "u1"
     assert captured["session_id"] == "s1"
     assert "我想要图文并茂" in captured["message"]
+    assert captured["llm_user_message"] == "针对问题【你更喜欢哪种输出】我的选择是：我想要图文并茂"
+    assert captured["use_latest_session_memory"] == "True"
 
 
 def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
@@ -340,7 +347,7 @@ def test_put_settings_updates_long_term_memory_and_skill_toggles(
                 },
                 "command_allowlist": ["cat", "ls", "rg"],
                 "command_blocklist": ["curl"],
-                "allowed_paths": ["root/workdir", ".sandbox/skills"],
+                "allowed_paths": ["workdir", ".wozclaw/skills"],
             },
         },
     )
@@ -368,7 +375,7 @@ def test_put_settings_updates_long_term_memory_and_skill_toggles(
     assert command_policy["command_allowlist"] == [
         "cat", "ls", "rg"]
     assert command_policy["allowed_paths"] == [
-        "root/workdir", ".sandbox/skills"]
+        "workdir", ".wozclaw/skills"]
 
 
 def test_upload_skill_zip_extracts_and_enables_skill(monkeypatch, tmp_path: Path) -> None:

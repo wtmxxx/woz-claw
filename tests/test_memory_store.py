@@ -311,6 +311,29 @@ def test_load_context_includes_session_memory(tmp_path: Path) -> None:
     assert "这是会话压缩摘要" in prompt
 
 
+def test_load_context_does_not_truncate_session_memory_by_token_budget(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    full_session_memory = "\n".join(
+        [f"line-{i}-这是很长的会话记忆内容" for i in range(1, 21)]
+    )
+    store.update_session_state(
+        "u14b",
+        "s14b",
+        {"session_memory": full_session_memory},
+    )
+
+    context = store.load_context(
+        "u14b",
+        "s14b",
+        query="测试",
+        session_limit=0,
+        session_token_budget=10,
+        daily_limit=0,
+    )
+
+    assert context.session_memory == full_session_memory
+
+
 def test_session_memory_accumulates_dialogue_and_tool_operations(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
 
@@ -320,15 +343,9 @@ def test_session_memory_accumulates_dialogue_and_tool_operations(tmp_path: Path)
         "s15",
         "assistant",
         "我先检查文件",
-        meta={
-            "tool_calls": [
-                {
-                    "name": "bash_command",
-                    "input": "ls root/",
-                    "output": "README.md",
-                }
-            ]
-        },
+    )
+    store.append_session_memory_tool_trace(
+        "u15", "s15", "bash_command", "ls root/", "README.md"
     )
 
     state = store.get_session_state("u15", "s15")
@@ -340,23 +357,39 @@ def test_session_memory_accumulates_dialogue_and_tool_operations(tmp_path: Path)
     assert "输出: README.md" in text
 
 
+def test_session_memory_records_assistant_tool_prelude_before_tool_trace(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_memory_message(
+        "u15a",
+        "s15a",
+        "assistant",
+        "我来查看一下当前的工作目录。",
+    )
+    store.append_session_memory_tool_trace(
+        "u15a",
+        "s15a",
+        "bash_command",
+        "pwd",
+        "/workdir/demo",
+    )
+
+    state = store.get_session_state("u15a", "s15a")
+    text = str(state.get("session_memory", ""))
+    assert text.index("assistant: 我来查看一下当前的工作目录。") < text.index(
+        "[tool] bash_command")
+
+
 def test_session_memory_ignores_approval_placeholder_tool_output(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
 
-    store.append_session_message(
+    store.append_session_message("u16", "s16", "assistant", "等待审批")
+    store.append_session_memory_tool_trace(
         "u16",
         "s16",
-        "assistant",
-        "等待审批",
-        meta={
-            "tool_calls": [
-                {
-                    "name": "bash_command",
-                    "input": "rm root/a.txt",
-                    "output": "__APPROVAL_REQUIRED__{\"request_id\":\"ap16\",\"command\":\"rm root/a.txt\"}",
-                }
-            ]
-        },
+        "bash_command",
+        "rm root/a.txt",
+        '__APPROVAL_REQUIRED__{"request_id":"ap16","command":"rm root/a.txt"}',
     )
 
     state = store.get_session_state("u16", "s16")
@@ -364,6 +397,123 @@ def test_session_memory_ignores_approval_placeholder_tool_output(tmp_path: Path)
     assert "等待审批" in text
     assert "__APPROVAL_REQUIRED__" not in text
     assert "[tool] bash_command" not in text
+
+
+def test_session_memory_ignores_approval_interrupt_error_text(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_message("u16aa", "s16aa", "assistant", "等待审批")
+    store.append_session_memory_tool_trace(
+        "u16aa",
+        "s16aa",
+        "bash_command",
+        "rm root/a.txt",
+        "Error: 检测到需要人工审批，已暂停执行并等待审批结果。",
+    )
+
+    state = store.get_session_state("u16aa", "s16aa")
+    text = str(state.get("session_memory", ""))
+    assert "等待审批" in text
+    assert "Error: 检测到需要人工审批，已暂停执行并等待审批结果。" not in text
+    assert "[tool] bash_command" not in text
+
+
+def test_session_memory_ignores_choice_interrupt_error_text(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_message("u16ab", "s16ab", "assistant", "等待用户选择")
+    store.append_session_memory_tool_trace(
+        "u16ab",
+        "s16ab",
+        "ask_human_choice",
+        '{"question":"你更喜欢哪种风格"}',
+        "Error: 检测到需要做出选择，已暂停执行并等待用户选择。",
+    )
+
+    state = store.get_session_state("u16ab", "s16ab")
+    text = str(state.get("session_memory", ""))
+    assert "等待用户选择" in text
+    assert "Error: 检测到需要做出选择，已暂停执行并等待用户选择。" not in text
+    assert "[tool] ask_human_choice" not in text
+
+
+def test_session_memory_keeps_choice_input_but_drops_choice_required_output(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_memory_tool_trace(
+        "u16ac",
+        "s16ac",
+        "ask_human_choice",
+        '{"question":"请选择要查询哪个城市的天气：","options":"上海,襄阳","allow_custom":true}',
+        '__CHOICE_REQUIRED__{"request_id":"11d2ed158e2f","question":"请选择要查询哪个城市的天气：","options":["上海","襄阳"],"allow_custom":true}',
+    )
+
+    state = store.get_session_state("u16ac", "s16ac")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] ask_human_choice" in text
+    assert "输入:" in text
+    assert "__CHOICE_REQUIRED__" not in text
+
+
+def test_session_memory_keeps_compact_context_output_only(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_message("u16b", "s16b", "assistant", "已压缩上下文")
+    store.append_session_memory_tool_trace(
+        "u16b",
+        "s16b",
+        "compact_context",
+        '{"summary": "用户询问当前工作目录"}',
+        "session memory updated",
+    )
+
+    state = store.get_session_state("u16b", "s16b")
+    text = str(state.get("session_memory", ""))
+    assert "已压缩上下文" in text
+    assert "[tool] compact_context" in text
+    assert '输入: {"summary": "用户询问当前工作目录"}' not in text
+    assert "输出: session memory updated" in text
+
+
+def test_session_memory_keeps_unrestricted_tool_even_with_placeholder_prefix(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_memory_tool_trace(
+        "u16bx",
+        "s16bx",
+        "custom_tool",
+        '{"foo":"bar"}',
+        '__APPROVAL_REQUIRED__{"request_id":"x1"}',
+    )
+
+    state = store.get_session_state("u16bx", "s16bx")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] custom_tool" in text
+    assert '输入: {"foo":"bar"}' in text
+    assert '__APPROVAL_REQUIRED__{"request_id":"x1"}' in text
+
+
+def test_session_memory_deduplicates_consecutive_same_tool_trace(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_memory_tool_trace(
+        "u16c",
+        "s16c",
+        "bash_command",
+        "pwd",
+        "/workdir/demo",
+    )
+    store.append_session_memory_tool_trace(
+        "u16c",
+        "s16c",
+        "bash_command",
+        "pwd",
+        "/workdir/demo",
+    )
+
+    state = store.get_session_state("u16c", "s16c")
+    text = str(state.get("session_memory", ""))
+    assert text.count("[tool] bash_command") == 1
 
 
 def test_pending_choice_uses_request_id_as_storage_key(tmp_path: Path) -> None:

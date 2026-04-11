@@ -1,0 +1,4 @@
+path:
+  # Relative paths are resolved from project root; absolute paths are also supported.
+  workdir: ".workdir"
+  wozclaw_dir: ".wozclaw"

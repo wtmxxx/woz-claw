@@ -1,0 +1,3 @@
+{"ts": "2026-04-12T02:33:48", "role": "user", "content": "你在哪个目录", "tags": ["session"], "meta": {}, "message_id": 1}
+{"ts": "2026-04-12T02:33:52", "role": "assistant", "content": "检测到需要人工审批，已暂停执行并等待审批结果。", "tags": ["session"], "meta": {}, "message_id": 2}
+{"ts": "2026-04-12T02:34:01", "role": "assistant", "content": "我当前的工作目录是 `/cygdrive/g/workdir`，这对应 Windows 路径 `G:\\workdir`。\n\n根据系统配置信息，我的工作目录是 `G:\\workdir`，配置目录是 `G:\\PythonStudy\\woz-claw\\.wozclaw`，技能目录位于 `.wozclaw` 目录下。", "tags": ["session"], "meta": {"tool_calls": [{"name": "bash_command", "input": "pwd", "output": "/cygdrive/g/workdir"}], "activity_traces": [{"type": "tool", "name": "bash_command", "source": "", "dir": "", "input": "pwd", "output": "/cygdrive/g/workdir"}]}, "message_id": 3}

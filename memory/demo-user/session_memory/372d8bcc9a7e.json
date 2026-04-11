@@ -1,0 +1,5 @@
+{
+  "session_memory": "当前会话：用户询问当前时间（06:23:38，日本标准时间），然后要求查看昨天的聊天记录。昨天（2026年4月11日）的聊天内容包括：1）查看目录结构并选择rag-demo项目；2）详细查看RAG演示项目结构；3）创建贪吃蛇游戏玩法介绍文档；4）查看可用的skills列表（7个skills，全部禁用）。用户现在要求再次压缩上下文。\n[tool] compact_context\n输出: session memory updated\nassistant: 我已经压缩了当前会话的上下文。现在您希望我做什么呢？根据记忆，您喜欢助手直接帮忙做事而不是反复询问确认，所以如果您有具体的任务或问题，请直接告诉我，我会立即开始处理。",
+  "pending_approval_request_id": "",
+  "approval_resume_state": {}
+}

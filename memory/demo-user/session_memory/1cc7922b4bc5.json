@@ -1,0 +1,8 @@
+{
+  "session_memory": "user: 当前在哪个目录下\nassistant: 当前目录是 `G:\\workdir`，这是一个空目录。根据你的路径配置文件，技能目录应该位于 `.wozclaw` 目录下，但当前工作目录中没有这个目录。\n[tool] bash_command\n输入: {\"command\": \"pwd\"}\n输出: /cygdrive/g/workdir\n[tool] bash_command\n输入: {\"command\": \"ls -la\"}\n输出: 总用量 8\ndrwxrwx---+ 1 I      I      0  4月 10 18:14 .\ndrwxrwx---+ 1 SYSTEM SYSTEM 0  4月 11 21:48 ..\nuser: 现在有哪些skill",
+  "pending_approval_request_id": "9b508fd12e75",
+  "approval_resume_state": {
+    "user_message": "现在有哪些skill",
+    "prompt_context": "[LONG_TERM]\n## 用户特征\n\n### 个人特质\n- 是一个感性的人\n\n### 基本信息\n- 生日：2005年10月5日\n\n### 兴趣爱好\n- 喜欢游泳\n- 喜欢吃人参果\n- 喜欢吃姑娘果\n- 喜欢吃花香蓝莓\n- 喜欢吃折耳根\n- 喜欢编程\n- 对美食烹饪感兴趣\n\n### 学习与技能\n- 正在学习Java编程语言\n\n### 沟通偏好\n- 喜欢助手直接帮忙做事，而不是反复询问确认\n- 倾向于让助手主动搜索信息而不是等待用户提供\n[SESSION_MEMORY]\nuser: 当前在哪个目录下\nassistant: 当前目录是 `G:\\workdir`，这是一个空目录。根据你的路径配置文件，技能目录应该位于 `.wozclaw` 目录下，但当前工作目录中没有这个目录。\n[tool] bash_command\n输入: {\"command\": \"pwd\"}\n输出: /cygdrive/g/workdir\n[tool] bash_command\n输入: {\"command\": \"ls -la\"}\n输出: 总用量 8\ndrwxrwx---+ 1 I      I      0  4月 10 18:14 .\ndrwxrwx---+ 1 SYSTEM SYSTEM 0  4月 11 21:48 ..\nuser: 现在有哪些skill"
+  }
+}

@@ -16,7 +16,7 @@ from agentscope.model import OpenAIChatModel
 from agentscope.tool import ToolResponse, Toolkit
 import yaml
 
-from wozclaw.config import load_llm_config, load_sandbox_config
+from wozclaw.config import load_llm_config, load_path_config
 from wozclaw.memory_store import MemoryStore
 
 
@@ -44,6 +44,223 @@ class FallbackAgent:
         return f"收到：{user_message}。我已经记录到记忆中。"
 
 
+class LLMDialogueRecorder:
+    """Wraps OpenAIChatModel to record each LLM call to dialogue log."""
+
+    def __init__(
+        self,
+        model: OpenAIChatModel,
+        memory_store: MemoryStore,
+        user_id: str,
+        session_id: str,
+    ) -> None:
+        self._model = model
+        self._memory_store = memory_store
+        self._user_id = user_id
+        self._session_id = session_id
+        self._node_counter = 0
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to wrapped model."""
+        return getattr(self._model, name)
+
+    async def __call__(self, prompt: Any, **kwargs: Any) -> Any:
+        """Intercept model calls to record raw LLM input/output only."""
+        self._record_tool_outputs_from_prompt(prompt)
+        filtered_prompt = self._filter_react_messages(prompt)
+        response = await self._model(filtered_prompt, **kwargs)
+        try:
+            self._node_counter += 1
+            assistant_text = self._extract_assistant_text(response)
+            if assistant_text:
+                self._memory_store.append_session_memory_message(
+                    self._user_id,
+                    self._session_id,
+                    "assistant",
+                    assistant_text,
+                )
+            request_envelope = {
+                "messages": filtered_prompt,
+            }
+            if kwargs:
+                request_envelope["kwargs"] = kwargs
+            self._memory_store.append_llm_dialogue_log(
+                user_id=self._user_id,
+                session_id=self._session_id,
+                input_value=self._serialize_value(request_envelope),
+                output_value=self._serialize_value(response),
+            )
+        except Exception:
+            pass  # Don't fail the agent if logging fails
+        return response
+
+    def _filter_react_messages(self, prompt: Any) -> Any:
+        if not isinstance(prompt, list):
+            return prompt
+
+        system_msg = None
+        session_memory_msg = None
+        latest_user_msg = None
+
+        for item in prompt:
+            role = self._message_field(item, "role")
+            name = self._message_field(item, "name")
+            if role == "system" and system_msg is None:
+                system_msg = item
+                continue
+
+            if role != "user":
+                continue
+
+            if name == "session_memory":
+                session_memory_msg = item
+                continue
+
+            if name == "user" or name is None:
+                latest_user_msg = item
+
+        latest_session_memory = self._load_latest_session_memory()
+        if latest_session_memory:
+            session_memory_msg = {
+                "role": "user",
+                "name": "session_memory",
+                "content": [{"type": "text", "text": latest_session_memory}],
+            }
+
+        filtered: list[Any] = []
+        if system_msg is not None:
+            filtered.append(system_msg)
+        if session_memory_msg is not None:
+            filtered.append(session_memory_msg)
+        if latest_user_msg is not None:
+            # Temporarily disable the third user message.
+            # filtered.append(latest_user_msg)
+            pass
+
+        if filtered:
+            return filtered
+        return prompt
+
+    def _load_latest_session_memory(self) -> str:
+        try:
+            state = self._memory_store.get_session_state(
+                self._user_id,
+                self._session_id,
+            )
+            return str(state.get("session_memory", "")).strip()
+        except Exception:
+            return ""
+
+    def _record_tool_outputs_from_prompt(self, prompt: Any) -> None:
+        if not isinstance(prompt, list):
+            return
+
+        for item in prompt:
+            role = self._message_field(item, "role")
+            if role != "tool":
+                continue
+
+            tool_name = str(self._message_field(
+                item, "name") or "tool").strip()
+            tool_output = self._tool_content_to_text(
+                self._message_field(item, "content"))
+            if not tool_output:
+                continue
+
+            try:
+                self._memory_store.append_session_memory_tool_trace(
+                    self._user_id,
+                    self._session_id,
+                    tool_name,
+                    "",
+                    tool_output,
+                )
+            except Exception:
+                continue
+
+    def _tool_content_to_text(self, content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text_value = item.get("text") if item.get(
+                        "type") == "text" else item.get("content", "")
+                    if text_value:
+                        chunks.append(str(text_value))
+                    continue
+                text_attr = getattr(item, "text", "")
+                if text_attr:
+                    chunks.append(str(text_attr))
+            return "\n".join(chunks).strip()
+        return str(content).strip()
+
+    def _message_field(self, msg: Any, field: str) -> Any:
+        if isinstance(msg, dict):
+            return msg.get(field)
+        return getattr(msg, field, None)
+
+    def _extract_assistant_text(self, value: Any) -> str:
+        content = getattr(value, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+
+        chunks: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    text_value = block.get("text", "")
+                else:
+                    text_value = block.get("content", "")
+                if text_value:
+                    chunks.append(str(text_value))
+                continue
+
+            text_attr = getattr(block, "text", "")
+            if text_attr:
+                chunks.append(str(text_attr))
+
+        return "\n".join(chunks).strip()
+
+    def _serialize_value(self, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, list):
+            return [self._serialize_value(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._serialize_value(item) for key, item in value.items()}
+        if isinstance(value, str):
+            return value
+
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return self._serialize_value(model_dump())
+            except Exception:
+                pass
+
+        dict_method = getattr(value, "dict", None)
+        if callable(dict_method):
+            try:
+                return self._serialize_value(dict_method())
+            except Exception:
+                pass
+
+        serialized: dict[str, Any] = {}
+        for attr in ("role", "name", "content"):
+            attr_value = getattr(value, attr, None)
+            if attr_value is not None:
+                serialized[attr] = self._serialize_value(attr_value)
+        if serialized:
+            return serialized
+        return repr(value)
+
+
 class ReActMemoryAgent:
     def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
         self.memory_store = memory_store
@@ -53,6 +270,9 @@ class ReActMemoryAgent:
         self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
         self._choice_interrupt_requested = False
         self._choice_interrupt_message = "检测到需要做出选择，已暂停执行并等待用户选择。"
+        self._bash_work_dir = self._project_root_dir().resolve()
+        self._active_session_memory = ""
+        self._active_memory_context = ""
 
         llm_config = load_llm_config()
         if not llm_config.api_key:
@@ -83,7 +303,12 @@ class ReActMemoryAgent:
         )
         self._fallback = FallbackAgent()
 
-    def respond(self, user_message: str, memory_context: str) -> AgentResponse:
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
         if self._agent is None:
             return AgentResponse(
                 text=self._fallback.respond(user_message, memory_context),
@@ -92,6 +317,8 @@ class ReActMemoryAgent:
                 activity_traces=[],
             )
 
+        self._active_memory_context = memory_context
+        self._active_session_memory = session_memory.strip()
         prompt = self.build_system_prompt(memory_context)
 
         self._active_tool_traces = []
@@ -112,10 +339,18 @@ class ReActMemoryAgent:
         self._choice_interrupt_requested = False
         self._choice_interrupt_message = "检测到需要做出选择，已暂停执行并等待用户选择。"
 
+        prompt_messages = []
+        session_memory_text = session_memory.strip()
+        if session_memory_text:
+            prompt_messages.append(
+                Msg(name="session_memory", content=session_memory_text, role="user"),
+            )
+        prompt_messages.append(
+            Msg(name="user", content=user_message, role="user"))
+
         try:
             reply_msg = self._run_async_with_interrupt(
-                self._agent.reply(
-                    Msg(name="user", content=user_message, role="user"))
+                self._agent.reply(prompt_messages)
             )
         except ApprovalInterrupt as exc:
             return AgentResponse(
@@ -145,16 +380,22 @@ class ReActMemoryAgent:
             activity_traces=list(self._active_activity_traces),
         )
 
-    def _build_chat_model(self, api_key: str, model_name: str, base_url: str, temperature: float) -> OpenAIChatModel:
+    def _build_chat_model(self, api_key: str, model_name: str, base_url: str, temperature: float) -> Any:
         client_kwargs: dict[str, Any] = {}
         if base_url.strip():
             client_kwargs["base_url"] = base_url.strip()
-        return OpenAIChatModel(
+        model = OpenAIChatModel(
             model_name=model_name,
             api_key=api_key,
             stream=False,
             client_kwargs=client_kwargs or None,
             generate_kwargs={"temperature": temperature},
+        )
+        return LLMDialogueRecorder(
+            model,
+            self.memory_store,
+            self.user_id,
+            self.session_id,
         )
 
     def _build_toolkit(self) -> Toolkit:
@@ -291,7 +532,7 @@ class ReActMemoryAgent:
             return self._to_tool_response(output)
 
         def bash_command(command: str) -> ToolResponse:
-            """Run a restricted bash command inside configured sandbox directories only."""
+            """Run a policy-guarded bash command in the tracked current working directory."""
             input_payload = {"command": command}
             try:
                 output = self._run_bash_command(command)
@@ -380,35 +621,16 @@ class ReActMemoryAgent:
         return True, ""
 
     def _expand_bash_aliases(self, command: str) -> str:
-        root_work_dir = self._root_work_dir().resolve().as_posix()
-        default_sandbox = self._default_sandbox_dir().resolve().as_posix()
-
-        # Use simple string replacement instead of shlex parsing to preserve shell operators (pipes, redirects, etc.)
-        result = command
-
-        # Replace root/ paths at argument/token boundaries, preserving separators
-        # Match: ^root/ or <space>root/ or <operator>root/
-        result = re.sub(r'(^|\s|(?<=[|>&;"]))root/',
-                        r'\1' + root_work_dir + '/', result)
-
-        # Also handle: ^root or <space>root or <operator>root when followed by whitespace/operator/end
-        result = re.sub(
-            r'(^|\s|(?<=[|>&;"]))root(?=\s|$|[|>&;"])', r'\1' + root_work_dir, result)
-
-        # Replace .sandbox paths once, without re-matching the expanded absolute path.
-        result = re.sub(
-            r'(^|\s|(?<=[|>&;\"]))\.sandbox(?=\s|$|/|[|>&;\"])',
-            r'\1' + default_sandbox,
-            result,
-        )
-
-        return result
+        return command
 
     def _root_work_dir(self) -> Path:
-        configured = self._configured_sandbox_dir()
+        configured = self._configured_work_dir()
         if configured is not None:
             return configured
-        return self._project_root_dir()
+        if self._bash_work_dir.exists() and self._bash_work_dir.is_dir():
+            return self._bash_work_dir
+        self._bash_work_dir = self._project_root_dir().resolve()
+        return self._bash_work_dir
 
     def _extract_command_paths(self, command_name: str, args: list[str]) -> list[str]:
         if command_name in {"echo", "pwd"}:
@@ -422,36 +644,37 @@ class ReActMemoryAgent:
     def _allowed_bash_dirs(self) -> list[Path]:
         root_work_dir = self._root_work_dir()
         root_work_dir.mkdir(parents=True, exist_ok=True)
+        return [root_work_dir.resolve()]
 
-        default_dir = self._default_sandbox_dir()
-        default_dir.mkdir(parents=True, exist_ok=True)
-        allowed = [root_work_dir.resolve(), default_dir.resolve()]
-
-        configured = self._configured_sandbox_dir()
-        if configured is not None:
-            configured.mkdir(parents=True, exist_ok=True)
-            allowed.append(configured.resolve())
-
-        return allowed
-
-    def _configured_sandbox_dir(self) -> Path | None:
+    def _configured_work_dir(self) -> Path | None:
         project_root = self._project_root_dir()
-        config = load_sandbox_config(project_root / "config" / "sandbox.yaml")
-        if not config.writable_dir:
+        config = load_path_config(project_root / "config" / "path.yaml")
+        if not config.workdir:
             return None
 
-        raw_path = config.writable_dir.strip()
+        raw_path = config.workdir.strip()
         if not raw_path:
             return None
-
-        # Normalize path: remove leading / or \\ for consistent handling
-        if raw_path.startswith(("/", "\\")):
-            raw_path = raw_path.lstrip("/\\")
 
         candidate = Path(raw_path)
         if not candidate.is_absolute():
             candidate = project_root / candidate
         return candidate
+
+    def _configured_wozclaw_dir(self) -> Path | None:
+        project_root = self._project_root_dir()
+        config = load_path_config(project_root / "config" / "path.yaml")
+        raw_path = config.wozclaw_dir.strip()
+        if not raw_path:
+            return None
+
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        return candidate
+
+    def _path_config_file(self) -> Path:
+        return (self._project_root_dir() / "config" / "path.yaml").resolve()
 
     def _run_bash_command(self, command: str) -> str:
         return self._run_bash_command_internal(command, skip_approval=False)
@@ -494,36 +717,80 @@ class ReActMemoryAgent:
 
         work_dir = self._root_work_dir()
         work_dir.mkdir(parents=True, exist_ok=True)
-        self._default_sandbox_dir().mkdir(parents=True, exist_ok=True)
 
-        # Explicitly prepend 'cd' to ensure correct working directory in all environments
-        # Some systems (WSL, login shells) may change cwd despite the cwd parameter
         expanded_cmd = self._expand_bash_aliases(command)
         work_dir_str = work_dir.resolve().as_posix()
-        full_command = f'cd "{work_dir_str}" && {expanded_cmd}'
+        full_command = (
+            f'cd "{work_dir_str}" && {expanded_cmd}; '
+            '__wozclaw_status=$?; '
+            'printf "\\n__WOZCLAW_CWD__%s\\n" "$(pwd -P)"; '
+            'exit $__wozclaw_status'
+        )
 
         cmd = ["bash", "-lc", full_command]
-
-        result = subprocess.run(
-            cmd,
-            cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            shell=False,
-            encoding="utf-8",
-            errors="replace",
-        )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        timeout_seconds = 15
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                shell=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            return "timeout"
+        stdout = self._strip_terminal_control_sequences(
+            result.stdout or "").strip()
+        stderr = self._strip_terminal_control_sequences(
+            result.stderr or "").strip()
+        clean_stdout, cwd_marker = self._extract_cwd_marker(stdout)
+        if cwd_marker:
+            try:
+                marker_path = Path(cwd_marker)
+                if marker_path.exists() and marker_path.is_dir():
+                    self._bash_work_dir = marker_path.resolve()
+            except Exception:
+                pass
 
         if result.returncode != 0:
-            error_text = stderr or stdout or f"command failed with exit code {result.returncode}"
+            error_text = stderr or clean_stdout or f"command failed with exit code {result.returncode}"
             return f"error: {error_text}"
 
-        # Convert absolute paths in stdout back to root/ format for LLM.
-        output = stdout[:100000] if stdout else "ok"
-        return self._rewrite_output_paths(output, work_dir)
+        output = clean_stdout[:100000] if clean_stdout else "ok"
+        return output
+
+    def _strip_terminal_control_sequences(self, text: str) -> str:
+        if not text:
+            return ""
+
+        cleaned = str(text)
+        # Strip CSI sequences such as clear-screen and cursor movement.
+        cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", cleaned)
+        # Strip OSC sequences.
+        cleaned = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", cleaned)
+        # Strip remaining single-character ESC sequences.
+        cleaned = re.sub(r"\x1b[@-_]", "", cleaned)
+        # Keep printable chars plus common whitespace used in command outputs.
+        cleaned = "".join(
+            ch for ch in cleaned if ch in "\n\r\t" or ord(ch) >= 32)
+        return cleaned
+
+    def _extract_cwd_marker(self, stdout: str) -> tuple[str, str]:
+        marker = "__WOZCLAW_CWD__"
+        lines = stdout.splitlines()
+        if not lines:
+            return stdout, ""
+
+        for index in range(len(lines) - 1, -1, -1):
+            line = lines[index]
+            if line.startswith(marker):
+                cwd = line[len(marker):].strip()
+                kept = lines[:index] + lines[index + 1:]
+                return "\n".join(kept).strip(), cwd
+        return stdout, ""
 
     def _evaluate_bash_policy(self, command: str) -> dict[str, str]:
         policy = self.memory_store.get_command_policy(self.user_id)
@@ -658,16 +925,8 @@ class ReActMemoryAgent:
             return None
 
         root_dir = self._root_work_dir().resolve()
-        sandbox_dir = self._default_sandbox_dir().resolve()
 
         try:
-            if text == "root" or text.startswith("root/"):
-                suffix = text[4:].lstrip("/")
-                return (root_dir / suffix).resolve()
-            if text == ".sandbox" or text.startswith(".sandbox/"):
-                suffix = text[8:].lstrip("/")
-                return (sandbox_dir / suffix).resolve()
-
             p = Path(text)
             if p.is_absolute():
                 return p.resolve()
@@ -684,10 +943,8 @@ class ReActMemoryAgent:
             return False
 
     def _rewrite_output_paths(self, output: str, work_dir: Path) -> str:
-        """Rewrite absolute work_dir paths back to root/ format."""
-        work_dir_posix = work_dir.resolve().as_posix()
-        # Replace work_dir prefix with root/ in output.
-        return output.replace(work_dir_posix, "root")
+        _ = work_dir
+        return output
 
     def _register_user_skills(self, toolkit: Toolkit) -> None:
         self._loaded_skills = []
@@ -852,13 +1109,16 @@ class ReActMemoryAgent:
         return self._skills_root_dir() / "global" / "skills.yaml"
 
     def _skills_root_dir(self) -> Path:
-        return self._default_sandbox_dir() / "skills"
+        return self._wozclaw_dir() / "skills"
 
     def _project_root_dir(self) -> Path:
         return Path(__file__).resolve().parents[2]
 
-    def _default_sandbox_dir(self) -> Path:
-        return self._project_root_dir() / ".sandbox"
+    def _wozclaw_dir(self) -> Path:
+        configured = self._configured_wozclaw_dir()
+        if configured is not None:
+            return configured
+        return self._project_root_dir() / ".wozclaw"
 
     def _record_tool_trace(self, name: str, input_value: Any, output_value: Any) -> None:
         item = {
@@ -877,6 +1137,19 @@ class ReActMemoryAgent:
                 "output": item["output"],
             }
         )
+        try:
+            self.memory_store.append_session_memory_tool_trace(
+                self.user_id,
+                self.session_id,
+                item["name"],
+                item["input"],
+                item["output"],
+            )
+        except Exception:
+            # Keep tracing non-blocking for agent runtime.
+            print(f"Failed to record tool trace for {item['name']}")
+            pass
+        self._refresh_prompt_with_latest_session_memory()
 
     def _to_tool_response(self, text: str) -> ToolResponse:
         return ToolResponse(content=[{"type": "text", "text": text}])
@@ -931,6 +1204,25 @@ class ReActMemoryAgent:
     def _run_async_with_interrupt(self, coro: Any) -> Any:
         return self._run_async(self._await_with_interrupt(coro))
 
+    def _refresh_prompt_with_latest_session_memory(self) -> None:
+        """Refresh sys_prompt with latest session_memory after each tool node."""
+        try:
+            context = self.memory_store.load_context(
+                self.user_id,
+                self.session_id,
+                query="",
+                session_limit=0,
+                session_token_budget=2800,
+                daily_limit=0,
+            )
+            latest_session_memory = context.session_memory
+            if latest_session_memory != self._active_session_memory:
+                self._active_session_memory = latest_session_memory
+                prompt = self.build_system_prompt(self._active_memory_context)
+                self._set_runtime_prompt(prompt)
+        except Exception:
+            pass
+
     def _set_runtime_prompt(self, prompt: str) -> None:
         # AgentScope exposes sys_prompt as read-only; update its backing field when available.
         if hasattr(self._agent, "_sys_prompt"):
@@ -951,7 +1243,7 @@ class ReActMemoryAgent:
 
     def build_system_prompt(self, memory_context: str) -> str:
         return (
-            "<ROLE>你是一个带记忆的助手，会优先遵守长期记忆中的稳定偏好。</ROLE>\n"
+            "<ROLE>你是一个带记忆的全能助手，会优先遵守长期记忆中的稳定偏好。</ROLE>\n"
             "<MISSION>在最少猜测下给出可验证、可追溯的回答与帮助。</MISSION>\n\n"
             "<MEMORY_RULES>\n"
             "1) 当用户信息有新增或变化时，你可以调用 remember_note。\n"
@@ -965,10 +1257,11 @@ class ReActMemoryAgent:
             "禁止仅凭猜测回答可被工具验证的问题。\n"
             "当你对用户偏好或方案拿不准时，调用 ask_human_choice 给出候选选项。\n"
             "ask_human_choice 的 options 请给 2-5 个简短选项，并允许用户自定义输入。\n"
-            "当会话变长、上下文冗余时，调用 compact_context 将当前有效上下文压缩为会话记忆。\n"
+            "当会话变长、上下文冗余或连续多轮后，你应主动调用 compact_context 将当前有效上下文压缩为会话记忆（注意保留关键细节），不要等待用户提醒。\n"
             "</TOOL_POLICY>\n\n"
             "<CONTEXT_RETRIEVAL>\n"
-            "默认只给最近 session 上下文；若需要更早 session 或 daily 历史，必须先搜索。\n"
+            "默认只提供长期记忆。短期会话记忆会作为单独的用户消息传入。\n"
+            "若需要 session 或 daily 历史消息，必须先搜索。\n"
             "search_session 与 search_daily 会返回 message_id。\n"
             "命中后如需扩展上下文，使用 get_session_window(message_id, before, after)。\n"
             "daily 同理使用 get_daily_window(message_id, before, after, day)。\n"
@@ -980,18 +1273,17 @@ class ReActMemoryAgent:
             "每次读取都要有明确目的，按需最小读取，避免一次读取整文件。\n"
             "在 Bash 里需要精确替换部分内容时，优先使用 sed（行级/范围替换）、awk（条件替换）、perl（复杂模式）。\n"
             "非必要不要替换整个文件。\n"
-            "bash_command 在工作目录内执行。\n"
+            "bash_command 默认在当前 Bash 工作目录执行；每次命令执行后，工作目录会保持为该命令结束时所在目录。\n"
             "bash_command 输出最多保留100000字符。\n"
             "可使用分段读取进一步控制上下文规模。\n"
-            "默认策略下：读操作可直接执行；写/删/执行操作需要人工审批（除非用户配置覆盖）。\n"
             "</BASH_POLICY>\n\n"
             "<PATHS>\n"
-            "root/ 表示工作目录，例：cat root/README.md\n"
-            ".sandbox/ 表示项目根目录的 .sandbox 目录，例：cat .sandbox/skills/demo-user/SKILL.md\n"
-            "bash 返回值中的绝对路径会被转换为 root/ 格式。\n"
+            f"工作目录: {self._root_work_dir()}\n"
+            f"配置目录: {self._wozclaw_dir()}\n"
+            "skills目录位于配置目录下。\n"
             "</PATHS>\n\n"
             f"<USER>当前用户ID: {self.user_id}</USER>\n\n"
-            f"<MEMORY>可用记忆上下文:\n{memory_context}</MEMORY>"
+            f"<MEMORY>\n{memory_context}</MEMORY>"
         )
 
 

@@ -8,8 +8,8 @@ skills:
 - name: self-improving-agent
   enabled: false
 - name: weather
-  enabled: false
+  enabled: true
 - name: humanizer
   enabled: false
 - name: multi-search-engine
-  enabled: false
+  enabled: true

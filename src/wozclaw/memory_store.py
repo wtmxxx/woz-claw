@@ -57,6 +57,7 @@ class MemoryStore:
         role: str,
         content: str,
         meta: dict[str, Any] | None = None,
+        record_session_memory: bool = True,
     ) -> None:
         file_path = self._session_file(user_id, session_id)
         next_message_id = self._next_message_id(self._read_jsonl(file_path))
@@ -64,6 +65,20 @@ class MemoryStore:
             role=role, content=content, tags=["session"], meta=meta)
         payload["message_id"] = next_message_id
         self._append_jsonl(file_path, payload)
+        if record_session_memory:
+            self._append_session_memory_entry(user_id, session_id, payload)
+
+    def append_session_memory_message(
+        self,
+        user_id: str,
+        session_id: str,
+        role: str,
+        content: str,
+    ) -> None:
+        payload = {
+            "role": role,
+            "content": content,
+        }
         self._append_session_memory_entry(user_id, session_id, payload)
 
     def append_daily_message(
@@ -92,18 +107,12 @@ class MemoryStore:
         self,
         user_id: str,
         session_id: str,
-        user_message: str,
-        assistant_reply: str,
-        memory_context: str,
-        tool_calls: list[dict[str, str]] | None = None,
+        input_value: Any,
+        output_value: Any,
     ) -> None:
         payload = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "session_id": session_id,
-            "user_message": user_message,
-            "assistant_reply": assistant_reply,
-            "memory_context": memory_context,
-            "tool_calls": tool_calls or [],
+            "input": input_value,
+            "output": output_value,
         }
         self._append_jsonl(self._llm_log_file(user_id), payload)
 
@@ -391,6 +400,59 @@ class MemoryStore:
         self._write_json(path, current)
         return current
 
+    def append_session_memory_tool_trace(
+        self,
+        user_id: str,
+        session_id: str,
+        name: str,
+        tool_input: str = "",
+        tool_output: str = "",
+    ) -> None:
+        """Append a tool trace to session memory, respecting filter rules."""
+        approval_marker = "__APPROVAL_REQUIRED__"
+        choice_required_marker = "__CHOICE_REQUIRED__"
+        approval_error_prefix = "Error: 检测到需要人工审批"
+        choice_error_prefix = "Error: 检测到需要做出选择"
+
+        tool_name = str(name).strip()
+        tool_output_str = str(tool_output).strip()
+        if tool_name == "bash_command" and (
+            tool_output_str.startswith(approval_marker)
+            or tool_output_str.startswith(approval_error_prefix)
+        ):
+            return
+        if tool_name == "ask_human_choice" and tool_output_str.startswith(choice_error_prefix):
+            return
+        if tool_name == "ask_human_choice" and tool_output_str.startswith(choice_required_marker):
+            tool_output_str = ""
+
+        lines: list[str] = []
+        lines.append(f"[tool] {tool_name}")
+        tool_input_str = str(tool_input).strip() if tool_input else ""
+        if tool_name == "compact_context":
+            # compact_context summary text can be very long and noisy; persist only tool output.
+            tool_input_str = ""
+        if tool_input_str:
+            lines.append(f"输入: {tool_input_str}")
+        if tool_output_str:
+            lines.append(f"输出: {tool_output_str}")
+
+        # Nothing useful to persist after filtering.
+        if not tool_input_str and not tool_output_str:
+            return
+
+        entry = "\n".join(lines)
+        state = self.get_session_state(user_id, session_id)
+        previous = str(state.get("session_memory", "")).strip()
+        if previous.endswith(entry):
+            return
+        merged = f"{previous}\n{entry}".strip() if previous else entry
+        self.update_session_state(
+            user_id,
+            session_id,
+            {"session_memory": merged},
+        )
+
     def set_pending_react_state(
         self,
         user_id: str,
@@ -463,12 +525,7 @@ class MemoryStore:
         if long_term_text:
             long_term_hits = [{"content": long_term_text}]
         session_state = self.get_session_state(user_id, session_id)
-        session_memory_raw = str(
-            session_state.get("session_memory", "")).strip()
-        session_memory = self._tail_text_by_token_budget(
-            session_memory_raw,
-            token_budget=max(1, session_token_budget // 2),
-        )
+        session_memory = str(session_state.get("session_memory", "")).strip()
         return MemoryContext(
             session_messages=session_messages,
             daily_messages=daily_messages,
@@ -478,16 +535,7 @@ class MemoryStore:
 
     def build_prompt_context(self, memory_context: MemoryContext) -> str:
         lines: list[str] = []
-        if memory_context.session_messages:
-            lines.append("[SESSION]")
-            for row in memory_context.session_messages:
-                lines.append(f"{row['role']}: {row['content']}")
-
-        if memory_context.daily_messages:
-            lines.append("[DAILY]")
-            for row in memory_context.daily_messages:
-                lines.append(f"{row['role']}: {row['content']}")
-
+        # Prompt context now only includes long-term memory and session summary.
         if memory_context.long_term_hits:
             lines.append("[LONG_TERM]")
             for row in memory_context.long_term_hits:
@@ -497,6 +545,14 @@ class MemoryStore:
             lines.append("[SESSION_MEMORY]")
             lines.append(memory_context.session_memory)
 
+        return "\n".join(lines)
+
+    def build_long_term_prompt_context(self, memory_context: MemoryContext) -> str:
+        lines: list[str] = []
+        if memory_context.long_term_hits:
+            lines.append("[LONG_TERM]")
+            for row in memory_context.long_term_hits:
+                lines.append(f"{row['content']}")
         return "\n".join(lines)
 
     def _take_recent_messages_by_token_budget(
@@ -623,40 +679,17 @@ class MemoryStore:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _append_session_memory_entry(self, user_id: str, session_id: str, message: dict[str, Any]) -> None:
-        approval_marker = "__APPROVAL_REQUIRED__"
-        choice_marker = "__CHOICE_REQUIRED__"
+        """Append user/assistant message to session memory in chronological order."""
         if not isinstance(message, dict):
             return
 
         role = str(message.get("role", "")).strip() or "assistant"
         content = str(message.get("content", "")).strip()
-        lines: list[str] = []
-        if content:
-            lines.append(f"{role}: {content}")
 
-        meta = message.get("meta") if isinstance(
-            message.get("meta"), dict) else {}
-        raw_tool_calls = meta.get(
-            "tool_calls") if isinstance(meta, dict) else []
-        if isinstance(raw_tool_calls, list):
-            for item in raw_tool_calls:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip() or "tool"
-                tool_input = str(item.get("input", "")).strip()
-                tool_output = str(item.get("output", "")).strip()
-                if tool_output.startswith(approval_marker) or tool_output.startswith(choice_marker):
-                    continue
-                lines.append(f"[tool] {name}")
-                if tool_input:
-                    lines.append(f"输入: {tool_input}")
-                if tool_output:
-                    lines.append(f"输出: {tool_output}")
-
-        if not lines:
+        if not content:
             return
 
-        entry = "\n".join(lines)
+        entry = f"{role}: {content}"
         state = self.get_session_state(user_id, session_id)
         previous = str(state.get("session_memory", "")).strip()
         merged = f"{previous}\n{entry}".strip() if previous else entry

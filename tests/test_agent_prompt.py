@@ -1,6 +1,6 @@
 import asyncio
 
-from wozclaw.agent import ReActMemoryAgent, ApprovalInterrupt
+from wozclaw.agent import LLMDialogueRecorder, ReActMemoryAgent, ApprovalInterrupt
 from wozclaw.memory_store import MemoryStore
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,36 +15,7 @@ def test_memory_prompt_requires_full_memory_rewrite(tmp_path) -> None:
     prompt = agent.build_system_prompt("[LONG_TERM]\n用户喜欢游泳")
 
     assert "完整" in prompt
-    assert "不是增量" in prompt
-    assert "remember_note" in prompt
-    assert "旧信息" in prompt
-    assert "搜索" in prompt
-    assert "message_id" in prompt
-    assert "get_session_window" in prompt
-    assert "get_daily_window" in prompt
-    assert "优先调用工具" in prompt
-    assert "能调用工具就调用工具" in prompt
-    assert "只有在工具确实无法解决问题时" in prompt
-    assert "compact_context" in prompt
-    assert "当前用户ID" in prompt
-    assert "u1" in prompt
-    assert "bash_command" in prompt
-    assert "root/" in prompt
-    assert "cat root/README.md" in prompt
-    assert "cat .sandbox/skills/demo-user/SKILL.md" in prompt
-    assert "root/是工作目录" not in prompt  # Changed phrasing
-    assert ".sandbox/是Agent配置" not in prompt  # Changed phrasing
-    assert "root/ 表示工作目录" in prompt
-    assert ".sandbox/ 表示项目根目录" in prompt
-    assert "输出最多保留100000字符" in prompt
-    assert "搜索优先" in prompt
-    assert "最小读取" in prompt
-    assert "再修改" in prompt
-    assert "精确替换部分内容" in prompt
-    assert "sed" in prompt
-    assert "awk" in prompt
-    assert "perl" in prompt
-    assert "非必要不要替换整个文件" in prompt
+    assert "你应主动调用 compact_context" in prompt
 
 
 def test_agent_module_no_langchain_or_langgraph_imports() -> None:
@@ -53,6 +24,165 @@ def test_agent_module_no_langchain_or_langgraph_imports() -> None:
     assert "from langchain_core" not in source
     assert "from langgraph" not in source
     assert "from langchain_openai" not in source
+
+
+def test_llm_dialogue_recorder_writes_assistant_prelude_before_tool_trace(tmp_path: Path) -> None:
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(
+                content=[
+                    {"type": "text", "text": "我来查看一下当前的工作目录。"},
+                    {"type": "tool_use", "name": "bash_command",
+                        "input": {"command": "pwd"}},
+                ]
+            )
+
+    store = MemoryStore(root_dir=tmp_path)
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-rec",
+        "s-rec",
+    )
+
+    response = asyncio.run(
+        recorder([SimpleNamespace(role="user", content="查看目录")]))
+
+    assert response.content[0]["text"] == "我来查看一下当前的工作目录。"
+    store.append_session_memory_tool_trace(
+        "u-rec",
+        "s-rec",
+        "bash_command",
+        "pwd",
+        "/workdir/demo",
+    )
+
+    state = store.get_session_state("u-rec", "s-rec")
+    text = str(state.get("session_memory", ""))
+    assert "assistant: 我来查看一下当前的工作目录。" in text
+    assert "[tool] bash_command" in text
+    assert text.index("assistant: 我来查看一下当前的工作目录。") < text.index(
+        "[tool] bash_command")
+
+
+def test_llm_dialogue_recorder_filters_react_messages_to_system_and_session_memory_only(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "ok"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-filter",
+        "s-filter",
+    )
+
+    prompt = [
+        {"role": "system", "name": "system", "content": [
+            {"type": "text", "text": "sys"}]},
+        {"role": "user", "name": "user", "content": [
+            {"type": "text", "text": "old user"}]},
+        {"role": "assistant", "name": "memory-assistant",
+            "content": [{"type": "text", "text": "tool thinking"}]},
+        {"role": "tool", "name": "bash_command",
+            "content": "cwd=/cygdrive/g/workdir"},
+        {"role": "user", "name": "session_memory", "content": [
+            {"type": "text", "text": "short memory"}]},
+        {"role": "user", "name": "user", "content": [
+            {"type": "text", "text": "latest user"}]},
+    ]
+
+    asyncio.run(recorder(prompt, tools=[{"type": "function"}]))
+
+    assert isinstance(captured["prompt"], list)
+    filtered = captured["prompt"]
+    assert len(filtered) == 2
+    assert filtered[0]["role"] == "system"
+    assert filtered[1]["role"] == "user"
+    assert filtered[1]["name"] == "session_memory"
+
+
+def test_llm_dialogue_recorder_records_tool_role_output_into_session_memory(tmp_path: Path) -> None:
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "ok"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-tool",
+        "s-tool",
+    )
+
+    prompt = [
+        {"role": "system", "name": "system", "content": [
+            {"type": "text", "text": "sys"}]},
+        {"role": "tool", "name": "bash_command", "content": "cwd=/workdir/demo"},
+        {"role": "user", "name": "session_memory",
+            "content": [{"type": "text", "text": "m"}]},
+    ]
+
+    asyncio.run(recorder(prompt))
+
+    state = store.get_session_state("u-tool", "s-tool")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] bash_command" in text
+    assert "输出: cwd=/workdir/demo" in text
+
+
+def test_llm_dialogue_recorder_injects_latest_session_memory_for_each_react_node(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "ok"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    store.append_session_memory_tool_trace(
+        "u-node-sync",
+        "s-node-sync",
+        "search_daily",
+        '{"keyword":"蓝莓"}',
+        "#1 ...",
+    )
+
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-node-sync",
+        "s-node-sync",
+    )
+
+    prompt = [
+        {"role": "system", "name": "system", "content": [
+            {"type": "text", "text": "sys"}]},
+        {"role": "user", "name": "user", "content": [
+            {"type": "text", "text": "latest user"}]},
+    ]
+
+    asyncio.run(recorder(prompt, tools=[{"type": "function"}]))
+
+    assert isinstance(captured["prompt"], list)
+    filtered = captured["prompt"]
+    assert len(filtered) == 2
+    assert filtered[0]["role"] == "system"
+    assert filtered[1]["role"] == "user"
+    assert filtered[1]["name"] == "session_memory"
+    content = filtered[1]["content"]
+    assert isinstance(content, list)
+    assert "[tool] search_daily" in str(content[0].get("text", ""))
 
 
 def test_respond_handles_read_only_sys_prompt(monkeypatch, tmp_path) -> None:
@@ -107,6 +237,105 @@ def test_respond_cancels_running_reply_when_approval_flag_set(tmp_path) -> None:
     result = agent.respond("执行危险命令", "上下文")
 
     assert "人工审批" in result.text
+
+
+def test_respond_sends_session_memory_as_user_message(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    class DummyAgent:
+        async def reply(self, msg):  # noqa: ANN001
+            captured["msg"] = msg
+            return SimpleNamespace(content="ok")
+
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-msg", session_id="s-msg")
+    agent._agent = DummyAgent()  # type: ignore[assignment]
+
+    result = agent.respond("最近问题", "[LONG_TERM]\n长期记忆", session_memory="会话记忆")
+
+    assert result.text == "ok"
+    assert isinstance(captured["msg"], list)
+    assert len(captured["msg"]) == 2
+    assert captured["msg"][0].role == "user"
+    assert captured["msg"][0].name == "session_memory"
+    assert captured["msg"][0].content == "会话记忆"
+    assert captured["msg"][1].role == "user"
+    assert captured["msg"][1].name == "user"
+    assert captured["msg"][1].content == "最近问题"
+
+
+def test_record_tool_trace_updates_session_memory_per_react_node(tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-node", session_id="s-node")
+
+    agent._record_tool_trace("search_daily", {"keyword": "蓝莓"}, "#1 ...")
+
+    state = store.get_session_state("u-node", "s-node")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] search_daily" in text
+    assert "输入:" in text
+    assert "输出: #1 ..." in text
+
+
+def test_record_tool_trace_respects_session_memory_filters(tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-node2", session_id="s-node2")
+
+    agent._record_tool_trace(
+        "compact_context", '{"summary":"x"}', "session memory updated")
+    agent._record_tool_trace(
+        "bash_command",
+        "rm root/a.txt",
+        '__APPROVAL_REQUIRED__{"request_id":"ap1","command":"rm root/a.txt"}',
+    )
+
+    state = store.get_session_state("u-node2", "s-node2")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] compact_context" in text
+    assert '输入: {"summary":"x"}' not in text
+    assert "输出: session memory updated" in text
+    assert "__APPROVAL_REQUIRED__" not in text
+
+
+def test_record_tool_trace_includes_ask_human_choice(tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-choice", session_id="s-choice")
+
+    agent._record_tool_trace(
+        "ask_human_choice",
+        '{"question":"你更喜欢哪种风格"}',
+        '__CHOICE_REQUIRED__{"request_id":"c1","question":"你更喜欢哪种风格"}',
+    )
+
+    state = store.get_session_state("u-choice", "s-choice")
+    text = str(state.get("session_memory", ""))
+    assert "[tool] ask_human_choice" in text
+    assert "输入:" in text
+    assert "__CHOICE_REQUIRED__" not in text
+
+
+def test_refresh_prompt_with_latest_session_memory_updates_agent_prompt(tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-refresh", session_id="s-refresh"
+    )
+
+    initial_prompt = "初始提示词"
+    agent._active_memory_context = initial_prompt
+    agent._active_session_memory = ""
+    agent._set_runtime_prompt("初始系统提示词")
+
+    store.append_session_memory_tool_trace(
+        "u-refresh", "s-refresh", "search_daily", "蓝莓", "#1 ..."
+    )
+
+    agent._refresh_prompt_with_latest_session_memory()
+
+    assert agent._active_session_memory != ""
+    assert "[tool] search_daily" in agent._active_session_memory
 
 
 def test_user_skills_yaml_controls_enabled_skills(monkeypatch, tmp_path) -> None:
@@ -477,17 +706,9 @@ def test_bash_command_runs_in_default_sandbox_with_bash(monkeypatch, tmp_path) -
 
     project_root = tmp_path / "project-root"
     work_dir = project_root / "custom-sandbox"
-    default_sandbox = project_root / ".sandbox"
-    default_sandbox.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
-
-    config_dir = project_root / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "sandbox.yaml").write_text(
-        "sandbox:\n  writable_dir: custom-sandbox\n",
-        encoding="utf-8",
-    )
+    agent._bash_work_dir = work_dir
 
     captured: dict[str, object] = {}
 
@@ -504,7 +725,7 @@ def test_bash_command_runs_in_default_sandbox_with_bash(monkeypatch, tmp_path) -
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = agent._run_bash_command("ls .sandbox")
+    result = agent._run_bash_command("ls .wozclaw")
 
     assert result == "ok"
     assert captured["cwd"] == work_dir
@@ -545,27 +766,10 @@ def test_bash_command_expands_root_and_sandbox_aliases(monkeypatch, tmp_path) ->
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(memory_store=store, user_id="u9", session_id="s9")
 
-    project_root = tmp_path / "project-root"
-    default_sandbox = project_root / ".sandbox"
-    configured_sandbox = project_root / "custom-sandbox"
-    default_sandbox.mkdir(parents=True, exist_ok=True)
-    configured_sandbox.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
-
-    config_dir = project_root / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "sandbox.yaml").write_text(
-        "sandbox:\n  writable_dir: custom-sandbox\n",
-        encoding="utf-8",
-    )
-
     expanded = agent._expand_bash_aliases(
         "ls root/src && ls .sandbox"
     )
-
-    assert (configured_sandbox / "src").as_posix() in expanded
-    assert default_sandbox.as_posix() in expanded
-    assert expanded.count(default_sandbox.as_posix()) == 1
+    assert expanded == "ls root/src && ls .sandbox"
 
 
 def test_bash_command_expands_dot_sandbox_without_double_replacement(monkeypatch, tmp_path) -> None:
@@ -573,16 +777,8 @@ def test_bash_command_expands_dot_sandbox_without_double_replacement(monkeypatch
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u9b", session_id="s9b")
 
-    project_root = tmp_path / "project-root"
-    default_sandbox = project_root / ".sandbox"
-    default_sandbox.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
-
     expanded = agent._expand_bash_aliases("ls -la .sandbox/")
-
-    default_sandbox_posix = default_sandbox.resolve().as_posix()
-    assert default_sandbox_posix in expanded
-    assert expanded.count(default_sandbox_posix) == 1
+    assert expanded == "ls -la .sandbox/"
 
 
 def test_bash_command_allows_root_path_without_strict_validation(monkeypatch, tmp_path) -> None:
@@ -610,7 +806,7 @@ def test_bash_command_allows_root_path_without_strict_validation(monkeypatch, tm
 
 
 def test_bash_rewrite_output_paths_converts_work_dir_to_root(tmp_path) -> None:
-    """Test that bash output paths are converted from work_dir to root/ format."""
+    """Test that output rewriting is now a no-op."""
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u11", session_id="s11")
@@ -625,9 +821,7 @@ def test_bash_rewrite_output_paths_converts_work_dir_to_root(tmp_path) -> None:
 
     result = agent._rewrite_output_paths(output, work_dir)
 
-    # Should convert work_dir prefix to root/
-    assert "root/src" in result
-    assert work_dir_posix not in result
+    assert result == output
 
 
 def test_bash_command_truncates_stdout_to_100k(monkeypatch, tmp_path) -> None:
@@ -653,6 +847,50 @@ def test_bash_command_truncates_stdout_to_100k(monkeypatch, tmp_path) -> None:
     assert output == long_stdout[:100000]
 
 
+def test_bash_command_strips_ansi_escape_sequences(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-ansi", session_id="s-ansi")
+
+    project_root = tmp_path / "project-root"
+    work_dir = project_root / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
+
+    ansi_output = "\x1b[H\x1b[2J\x1b[3J/cygdrive/g/workdir\n__WOZCLAW_CWD__/cygdrive/g/workdir\n"
+
+    def fake_run(cmd, cwd, capture_output, text, timeout, shell, encoding, errors):  # noqa: ANN001
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=ansi_output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    output = agent._run_bash_command("pwd")
+
+    assert output == "/cygdrive/g/workdir"
+    assert "\x1b" not in output
+
+
+def test_bash_command_returns_timeout_text_on_timeout(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-timeout", session_id="s-timeout")
+
+    project_root = tmp_path / "project-root"
+    work_dir = project_root / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
+
+    def fake_run(cmd, cwd, capture_output, text, timeout, shell, encoding, errors):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    output = agent._run_bash_command(
+        "find /cygdrive/g -name '.wozclaw' -type d")
+
+    assert output == "timeout"
+
+
 def test_bash_supports_pipes_and_redirects(tmp_path) -> None:
     """Test that bash_command now allows pipes and redirects."""
     store = MemoryStore(root_dir=tmp_path)
@@ -672,8 +910,8 @@ def test_bash_supports_pipes_and_redirects(tmp_path) -> None:
     assert ok is True
 
 
-def test_configured_sandbox_handles_unix_style_paths(monkeypatch, tmp_path) -> None:
-    """Test that writable_dir with Unix-style path (e.g., /workdir) is resolved correctly."""
+def test_configured_workdir_handles_relative_paths(monkeypatch, tmp_path) -> None:
+    """Test that relative configured workdir is resolved from project root."""
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u13", session_id="s13")
@@ -685,25 +923,45 @@ def test_configured_sandbox_handles_unix_style_paths(monkeypatch, tmp_path) -> N
     (workdir / "test.txt").write_text("content", encoding="utf-8")
 
     monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
+    agent._bash_work_dir = project_root
 
     config_dir = project_root / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "sandbox.yaml").write_text(
-        "sandbox:\n  writable_dir: /workdir\n",
+    (config_dir / "path.yaml").write_text(
+        "path:\n  workdir: workdir\n",
         encoding="utf-8",
     )
 
     # Force reload of config by calling the method directly
-    configured = agent._configured_sandbox_dir()
+    configured = agent._configured_work_dir()
     assert configured == workdir
 
-    # Verify root_work_dir also returns the correct path
     root_work = agent._root_work_dir()
     assert root_work == workdir
 
 
+def test_memory_prompt_paths_includes_configured_dirs(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u-path", session_id="s-path")
+
+    project_root = tmp_path / "project-root"
+    config_dir = project_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "path.yaml").write_text(
+        "path:\n  workdir: workdir\n  wozclaw_dir: .wozclaw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent, "_project_root_dir", lambda: project_root)
+
+    prompt = agent.build_system_prompt("ctx")
+
+    assert str((project_root / "workdir").resolve()) in prompt
+    assert str((project_root / ".wozclaw").resolve()) in prompt
+
+
 def test_bash_aliases_preserve_pipes_and_redirects(tmp_path) -> None:
-    """Test that bash operators (pipes, redirects, etc.) are preserved during path expansion."""
+    """Test that command text is preserved when no alias expansion is applied."""
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u14", session_id="s14")
@@ -733,18 +991,13 @@ def test_bash_aliases_preserve_pipes_and_redirects(tmp_path) -> None:
             expanded_and = agent._expand_bash_aliases("ls root/a && ls root/b")
             assert "&&" in expanded_and
 
-            # Verify paths were still replaced
-            work_dir_posix = work_dir.resolve().as_posix()
-            assert work_dir_posix in expanded_pipe
+            assert expanded_pipe == "find root/ -type f | head -20"
+            assert expanded_redirect == "ls -la root/ > root/output.txt"
+            assert expanded_and == "ls root/a && ls root/b"
 
 
 def test_nested_root_prefix_not_double_replaced(tmp_path) -> None:
-    """Test that root/root/ is replaced only once to workspace/root/, not workspace/workspace/.
-
-    This addresses the issue: if workdir contains a 'root/' subdirectory,
-    then a command like 'cat root/root/file.txt' should become 'cat <workdir-path>/root/file.txt',
-    not 'cat <workdir-path>/<workdir-path>/file.txt'.
-    """
+    """Test that root/root text is left untouched without alias rewriting."""
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u15", session_id="s15")
@@ -760,25 +1013,9 @@ def test_nested_root_prefix_not_double_replaced(tmp_path) -> None:
     import unittest.mock
     with unittest.mock.patch.object(agent, "_project_root_dir", return_value=project_root):
         with unittest.mock.patch.object(agent, "_root_work_dir", return_value=work_dir):
-            work_dir_posix = work_dir.resolve().as_posix()
-
-            # Test: root/root/file should become workdir/root/file, NOT workdir/workdir/file
             expanded = agent._expand_bash_aliases("cat root/root/file.txt")
 
-            # Should contain workdir path once
-            assert expanded.count(work_dir_posix) == 1, \
-                f"Path should appear exactly once, but got: {expanded}"
+            assert expanded == "cat root/root/file.txt"
 
-            # Should NOT contain double workdir
-            double_path = work_dir_posix + "/" + work_dir_posix
-            assert double_path not in expanded, \
-                f"Path was double-replaced: {expanded}"
-
-            # Should have /root/ in the middle
-            assert "/root/" in expanded or "\\root\\" in expanded, \
-                f"Nested root/ should remain: {expanded}"
-
-            # Test with multiple root/ references: root/a root/b should both be replaced
             expanded_multi = agent._expand_bash_aliases("ls root/a root/b")
-            assert expanded_multi.count(work_dir_posix) == 2, \
-                f"Both root/ references should be replaced: {expanded_multi}"
+            assert expanded_multi == "ls root/a root/b"

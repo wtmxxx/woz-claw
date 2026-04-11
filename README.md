@@ -43,11 +43,11 @@ memory/
 Agent 支持全局技能与按用户技能两层配置：
 
 ```text
-skills/global/skills.yaml       # 全局默认技能
-skills/{user_id}/skills.yaml    # 用户覆盖配置
+.wozclaw/skills/global/skills.yaml       # 全局默认技能
+.wozclaw/skills/{user_id}/skills.yaml    # 用户覆盖配置
 ```
 
-全局示例（`skills/global/skills.yaml`）：
+全局示例（`.wozclaw/skills/global/skills.yaml`）：
 
 ```yaml
 skills:
@@ -55,7 +55,7 @@ skills:
     enabled: true
 ```
 
-用户示例（`skills/{user_id}/skills.yaml`）：
+用户示例（`.wozclaw/skills/{user_id}/skills.yaml`）：
 
 ```yaml
 skills:
@@ -68,8 +68,8 @@ skills:
 规则：
 - 全局配置与用户配置会合并；同名技能下，用户配置优先。
 - 最终仅加载 `enabled: true` 的技能。
-- 全局技能目录：`.sandbox/skills/global/{name}/SKILL.md`。
-- 用户技能目录：`.sandbox/skills/{user_id}/{name}/SKILL.md`。
+- 全局技能目录：`.wozclaw/skills/global/{name}/SKILL.md`。
+- 用户技能目录：`.wozclaw/skills/{user_id}/{name}/SKILL.md`。
 - 技能目录中必须存在 `SKILL.md` 才会加载。
 - 文件不存在或格式错误时会自动降级为“不加载任何技能”，不影响聊天主流程。
 
@@ -77,26 +77,24 @@ skills:
 
 Agent 提供 `bash_command` 用于读取/修改技能目录下文件。此工具是受限 shell：
 
-- 统一使用 `bash -lc` 执行命令，工作目录固定为项目根目录。
-- 路径表达约定：`root/` 表示工作区根目录。
-- 内置 sandbox 为 `.sandbox/`（技能默认放在 `.sandbox/skills/`）。
-- 若配置了 `config/sandbox.yaml` 的 `sandbox.writable_dir`，也可以访问该目录（使用其真实路径或 `root/` 相对路径）。
-- 禁止绝对路径、`..`、管道、重定向、多命令拼接、环境变量插值。
+- 统一使用 `bash -lc` 执行命令。
+- 默认工作目录为 Bash 每次执行命令前所在目录；命令执行后会更新为该命令结束时所在目录。
+- 技能目录默认位于 `.wozclaw/skills/`。
+- 写/删/执行等高风险操作通过命令审批控制。
 
 常用正确示例：
 
 ```bash
-ls .sandbox/skills/demo-user
-cat .sandbox/skills/demo-user/demo-user-style/SKILL.md
-cat root/README.md
-mkdir -p .sandbox/skills/demo-user/new-skill
+pwd
+ls .wozclaw/skills/demo-user
+cat .wozclaw/skills/demo-user/demo-user-style/SKILL.md
+mkdir -p .wozclaw/skills/demo-user/new-skill
 ```
 
 错误示例：
 
-- `cat ../skills/demo-user/demo-user-style/SKILL.md`（包含 `..`）
-- `cat /etc/passwd`（绝对路径）
-- `cat .sandbox/skills/demo-user/demo-user-style/SKILL.md ; ls`（多命令）
+- `cat /etc/passwd`（越权读取系统文件）
+- `rm -rf .wozclaw/skills/demo-user/demo-user-style`（删除操作，需审批）
 
 ### 2. 统一消息结构
 

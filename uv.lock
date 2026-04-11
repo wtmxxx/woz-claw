@@ -8,40 +8,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "WozClaw"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "agentscope" },
-    { name = "fastapi" },
-    { name = "jinja2" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
-    { name = "pyyaml" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agentscope", specifier = ">=1.0.18" },
-    { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "jinja2", specifier = ">=3.1.4" },
-    { name = "pydantic", specifier = ">=2.9.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
-    { name = "python-dotenv", specifier = ">=1.0.1" },
-    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=311" },
-    { name = "pyyaml", specifier = ">=6.0.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "agentscope"
 version = "1.0.18"
 source = { registry = "https://pypi.org/simple" }
@@ -2621,6 +2587,42 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9a/3f/f70e03f40ffc9a30d817eef7da1be72ee4956ba8d7255c399a01b135902a/websockets-16.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:a653aea902e0324b52f1613332ddf50b00c06fdaf7e92624fbf8c77c78fa5767", size = 178735, upload-time = "2026-01-10T09:23:42.259Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
 ]
+
+[[package]]
+name = "wozclaw"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "agentscope" },
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "python-multipart" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "pyyaml" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agentscope", specifier = ">=1.0.18" },
+    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "jinja2", specifier = ">=3.1.4" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=311" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "wsproto"

@@ -9,10 +9,21 @@ from wozclaw.service import ChatService
 class DummyAgent:
     def __init__(self) -> None:
         self.last_context = ""
+        self.last_session_memory = ""
+
+    def respond(self, user_message: str, memory_context: str, session_memory: str = "") -> str:
+        self.last_context = memory_context
+        self.last_session_memory = session_memory
+        return f"echo:{user_message} | ctx:{'中文输出' in memory_context}"
+
+
+class LegacyDummyAgent:
+    def __init__(self) -> None:
+        self.last_context = ""
 
     def respond(self, user_message: str, memory_context: str) -> str:
         self.last_context = memory_context
-        return f"echo:{user_message} | ctx:{'中文输出' in memory_context}"
+        return f"legacy:{user_message}"
 
 
 class DummyTitleGenerator:
@@ -88,9 +99,13 @@ class DummyChoiceAgent:
 
 
 class DummyApprovalResumeAgent:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     def respond(self, user_message: str, memory_context: str) -> AgentResponse:
         _ = memory_context
-        if "继续刚才被审批中断的任务" in user_message:
+        self.calls.append(user_message)
+        if len(self.calls) > 1:
             return AgentResponse(
                 text="已继续完成当前任务",
                 tool_calls=[
@@ -161,12 +176,7 @@ def test_chat_service_persists_messages_and_uses_context(tmp_path: Path) -> None
     assert len(lines) == 2
 
     log_file = tmp_path / "u1" / "logs" / "llm_dialogue.jsonl"
-    assert log_file.exists()
-    log_rows = [json.loads(item) for item in log_file.read_text(
-        encoding="utf-8").strip().splitlines()]
-    assert len(log_rows) == 1
-    assert log_rows[0]["session_id"] == "s1"
-    assert log_rows[0]["user_message"] == "你好"
+    assert not log_file.exists() or not log_file.read_text(encoding="utf-8").strip()
 
     conversations = service.list_conversations("u1")
     assert len(conversations) == 1
@@ -177,6 +187,24 @@ def test_chat_service_persists_messages_and_uses_context(tmp_path: Path) -> None
     assert len(messages) == 2
     assert messages[0]["role"] == "user"
     assert messages[1]["role"] == "assistant"
+
+
+def test_chat_service_does_not_write_llm_dialogue_for_plain_agents(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.remember_long_term("u-log", "长期偏好：中文输出")
+    store.update_session_state(
+        "u-log", "s-log", {"session_memory": "短期摘要：正在排查路径配置"})
+
+    service = ChatService(
+        memory_store=store,
+        agent=DummyAgent(),
+        title_generator=DummyTitleGenerator(),
+    )
+
+    service.chat(user_id="u-log", session_id="s-log", message="最近一次提问")
+
+    log_file = tmp_path / "u-log" / "logs" / "llm_dialogue.jsonl"
+    assert not log_file.exists() or not log_file.read_text(encoding="utf-8").strip()
 
 
 def test_chat_service_title_generation_ignores_assistant_reply(tmp_path: Path) -> None:
@@ -195,7 +223,7 @@ def test_chat_service_title_generation_ignores_assistant_reply(tmp_path: Path) -
     assert generator.calls[0][1] == ""
 
 
-def test_chat_service_injects_session_by_token_budget(tmp_path: Path) -> None:
+def test_chat_service_uses_only_long_term_and_session_memory_context(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     agent = DummyAgent()
     service = ChatService(memory_store=store, agent=agent,
@@ -209,14 +237,54 @@ def test_chat_service_injects_session_by_token_budget(tmp_path: Path) -> None:
         store.append_session_message(
             "u2", "s2", "assistant", f"a{idx}-{long_chunk}")
 
+    store.remember_long_term("u2", "长期偏好：中文")
+    store.update_session_state("u2", "s2", {"session_memory": "短期摘要：正在排查路径配置"})
+
     service.chat(user_id="u2", session_id="s2", message="当前问题")
 
-    assert "u1-" not in agent.last_context
-    assert "a1-" not in agent.last_context
-    assert "u1" not in agent.last_context
-    assert "u8-" in agent.last_context
+    assert "[SESSION]" not in agent.last_context
     assert "[DAILY]" not in agent.last_context
-    assert "今天" not in agent.last_context
+    assert "u8-" not in agent.last_context
+    assert "[LONG_TERM]" in agent.last_context
+    assert "长期偏好：中文" in agent.last_context
+    assert "[SESSION_MEMORY]" not in agent.last_context
+    assert "短期摘要：正在排查路径配置" not in agent.last_context
+    assert "短期摘要：正在排查路径配置" in agent.last_session_memory
+    assert "user: 当前问题" in agent.last_session_memory
+
+
+def test_chat_service_legacy_agents_receive_session_memory_via_merged_context(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = LegacyDummyAgent()
+    service = ChatService(memory_store=store, agent=agent,
+                          title_generator=DummyTitleGenerator())
+
+    store.remember_long_term("u2b", "长期偏好：中文")
+    store.update_session_state(
+        "u2b", "s2b", {"session_memory": "短期摘要：正在排查路径配置"})
+
+    service.chat(user_id="u2b", session_id="s2b", message="当前问题")
+
+    assert "[SESSION_MEMORY]" in agent.last_context
+    assert "短期摘要：正在排查路径配置" in agent.last_context
+
+
+def test_chat_service_can_use_latest_session_memory_after_appending_user_message(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = DummyAgent()
+    service = ChatService(memory_store=store, agent=agent,
+                          title_generator=DummyTitleGenerator())
+
+    store.update_session_state("u2c", "s2c", {"session_memory": "已有摘要"})
+
+    service.chat(
+        user_id="u2c",
+        session_id="s2c",
+        message="这是用户选择消息",
+        use_latest_session_memory=True,
+    )
+
+    assert "user: 这是用户选择消息" in agent.last_session_memory
 
 
 def test_chat_service_exposes_tool_calls_for_ui(tmp_path: Path) -> None:
@@ -395,6 +463,23 @@ def test_chat_service_does_not_persist_approval_placeholder_tool_trace(tmp_path:
     assert pending_assistant["activity_traces"] == []
 
 
+def test_chat_service_does_not_add_approval_interrupt_message_to_session_memory(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=DummyApprovalResumeAgent(),
+        title_generator=DummyTitleGenerator(),
+    )
+
+    result = service.chat(user_id="u24", session_id="s24", message="删除并继续")
+    assert result.approval_request is not None
+
+    state = store.get_session_state("u24", "s24")
+    text = str(state.get("session_memory", ""))
+    assert "检测到需要人工审批，已暂停执行并等待审批结果。" not in text
+    assert "__APPROVAL_REQUIRED__" not in text
+
+
 def test_chat_service_filters_approval_placeholder_from_activity_traces(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     service = ChatService(
@@ -460,3 +545,177 @@ def test_resume_after_approval_prefers_in_process_runtime_state(monkeypatch, tmp
     assert resumed.reply == "基于同一运行时状态继续完成"
     assert len(RuntimeStateAgent.instances) == 1
     assert len(RuntimeStateAgent.instances[0].calls) == 2
+
+
+def test_resume_after_approval_appends_tool_output_to_session_memory(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=DummyApprovalResumeAgent(),
+        title_generator=DummyTitleGenerator(),
+    )
+
+    first = service.chat(user_id="u25", session_id="s25", message="执行命令")
+    assert first.approval_request is not None
+
+    initial_state = store.get_session_state("u25", "s25")
+    initial_memory = str(initial_state.get("session_memory", "")).strip()
+
+    resumed = service.resume_after_approval(
+        user_id="u25",
+        session_id="s25",
+        request_id=first.approval_request["request_id"],
+        command="rm root/a.txt",
+        output="removed successfully",
+        approved=True,
+    )
+
+    state = store.get_session_state("u25", "s25")
+    updated_memory = str(state.get("session_memory", "")).strip()
+    assert "[tool] bash_command" in updated_memory
+    assert "输入: rm root/a.txt" in updated_memory
+    assert "输出: removed successfully" in updated_memory
+    assert updated_memory != initial_memory
+
+
+def test_resume_after_approval_keeps_session_memory_updated(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.remember_long_term("u26", "长期记忆")
+
+    class AgentCapturingLLMRequest:
+        def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+            _ = memory_store
+            _ = user_id
+            _ = session_id
+            self.calls: list[str] = []
+
+        def respond(self, user_message: str, memory_context: str, session_memory: str = "") -> AgentResponse:
+            _ = memory_context
+            self.calls.append(user_message)
+            if len(self.calls) == 1:
+                return AgentResponse(
+                    text="需要审批",
+                    tool_calls=[
+                        {
+                            "name": "bash_command",
+                            "input": "rm root/a.txt",
+                            "output": "__APPROVAL_REQUIRED__{\"request_id\":\"ax\",\"command\":\"rm root/a.txt\"}",
+                        }
+                    ],
+                )
+            return AgentResponse(
+                text="继续完成"
+            )
+
+    agent = AgentCapturingLLMRequest(store, "u26", "s26")
+    service = ChatService(
+        memory_store=store,
+        agent=agent,
+        title_generator=DummyTitleGenerator(),
+    )
+
+    first = service.chat(user_id="u26", session_id="s26", message="执行")
+    assert first.approval_request is not None
+
+    resumed = service.resume_after_approval(
+        user_id="u26",
+        session_id="s26",
+        request_id=first.approval_request["request_id"],
+        command="rm root/a.txt",
+        output="ok",
+        approved=True,
+    )
+
+    # Verify agent received 2 calls
+    assert len(agent.calls) == 2
+    state = store.get_session_state("u26", "s26")
+    assert "[tool] bash_command" in str(state.get("session_memory", ""))
+
+
+def test_resume_after_approval_passes_original_question_to_agent(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    class CaptureApprovalResumeAgent:
+        def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+            _ = memory_store
+            _ = user_id
+            _ = session_id
+            self.calls: list[str] = []
+
+        def respond(self, user_message: str, memory_context: str, session_memory: str = "") -> AgentResponse:
+            _ = memory_context
+            _ = session_memory
+            self.calls.append(user_message)
+            if len(self.calls) == 1:
+                return AgentResponse(
+                    text="需要审批",
+                    tool_calls=[
+                        {
+                            "name": "bash_command",
+                            "input": "rm root/a.txt",
+                            "output": "__APPROVAL_REQUIRED__{\"request_id\":\"apx\",\"command\":\"rm root/a.txt\"}",
+                        }
+                    ],
+                )
+            return AgentResponse(text="继续完成")
+
+    agent = CaptureApprovalResumeAgent(store, "u27", "s27")
+    service = ChatService(
+        memory_store=store,
+        agent=agent,
+        title_generator=DummyTitleGenerator(),
+    )
+
+    first = service.chat(user_id="u27", session_id="s27", message="删除旧文件")
+    assert first.approval_request is not None
+
+    resumed = service.resume_after_approval(
+        user_id="u27",
+        session_id="s27",
+        request_id=first.approval_request["request_id"],
+        command="rm root/a.txt",
+        output="ok",
+        approved=True,
+    )
+
+    assert resumed.reply == "继续完成"
+    assert agent.calls == ["删除旧文件", "删除旧文件"]
+
+
+def test_llm_dialogue_proxy_records_raw_input_and_output_only(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from wozclaw.agent import LLMDialogueRecorder
+
+    store = MemoryStore(root_dir=tmp_path)
+
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):  # noqa: ANN001
+            _ = kwargs
+            return SimpleNamespace(content="ok")
+
+    recorder = LLMDialogueRecorder(
+        model=DummyModel(),
+        memory_store=store,
+        user_id="u-multi",
+        session_id="s-multi",
+    )
+
+    prompt = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    import asyncio
+
+    asyncio.run(recorder(prompt))
+
+    log_file = tmp_path / "u-multi" / "logs" / "llm_dialogue.jsonl"
+    rows = [json.loads(item) for item in log_file.read_text(
+        encoding="utf-8").strip().splitlines()]
+
+    assert len(rows) == 1
+    assert set(rows[0].keys()) == {"input", "output"}
+    assert rows[0]["input"]["messages"] == prompt
+    assert rows[0]["input"].get("kwargs", {}) == {}
+    assert rows[0]["output"] == {"content": "ok"}

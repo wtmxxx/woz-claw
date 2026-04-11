@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yaml
 
+from wozclaw.config import load_path_config
 from wozclaw.memory_store import MemoryStore
 from wozclaw.service import ChatService
 
@@ -160,7 +161,13 @@ def get_pending_state(user_id: str, session_id: str) -> dict[str, Any]:
 
 
 def _skills_root_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / ".sandbox" / "skills"
+    project_root = Path(__file__).resolve().parents[2]
+    path_cfg = load_path_config(project_root / "config" / "path.yaml")
+    raw_dir = path_cfg.wozclaw_dir.strip() or ".wozclaw"
+    base_dir = Path(raw_dir)
+    if not base_dir.is_absolute():
+        base_dir = project_root / base_dir
+    return base_dir / "skills"
 
 
 def _user_skills_yaml_path(user_id: str) -> Path:
@@ -372,7 +379,13 @@ def submit_choice(req: ChoiceDecisionRequest) -> dict[str, Any]:
             status_code=400, detail="choice content is required")
 
     choice_message = f"针对问题【{question}】我的选择是：{final_choice}" if question else f"我的选择是：{final_choice}"
-    result = chat_service.chat(user_text, session_text, choice_message)
+    result = chat_service.chat(
+        user_text,
+        session_text,
+        choice_message,
+        llm_user_message=choice_message,
+        use_latest_session_memory=True,
+    )
 
     return {
         "ok": True,

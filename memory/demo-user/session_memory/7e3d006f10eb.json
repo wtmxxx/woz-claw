@@ -1,0 +1,5 @@
+{
+  "session_memory": "user: 你在哪个目录\nassistant: 我来查看一下当前的工作目录。\n[tool] bash_command\n输入: pwd\n输出: /cygdrive/g/workdir\nassistant: 根据刚才的命令执行结果，我当前在 `/cygdrive/g/workdir` 目录下。\n\n从路径映射来看，这对应的是 Windows 系统中的 `G:\\workdir` 目录，这也是配置中提到的默认工作目录。\nassistant: 根据刚才的命令执行结果，我当前在 `/cygdrive/g/workdir` 目录下。\n\n从路径映射来看，这对应的是 Windows 系统中的 `G:\\workdir` 目录，这也是配置中提到的默认工作目录。",
+  "pending_approval_request_id": "",
+  "approval_resume_state": {}
+}
