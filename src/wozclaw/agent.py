@@ -28,6 +28,14 @@ class AgentResponse:
     activity_traces: list[dict[str, str]] = field(default_factory=list)
 
 
+class ApprovalInterrupt(Exception):
+    """Raised to stop the current ReAct loop immediately when human approval is required."""
+
+
+class ChoiceInterrupt(Exception):
+    """Raised to stop the current ReAct loop immediately when human choice is required."""
+
+
 class FallbackAgent:
     def respond(self, user_message: str, memory_context: str) -> str:
         # Keep fallback deterministic for local demo and tests.
@@ -41,6 +49,10 @@ class ReActMemoryAgent:
         self.memory_store = memory_store
         self.user_id = user_id
         self.session_id = session_id
+        self._approval_interrupt_requested = False
+        self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
+        self._choice_interrupt_requested = False
+        self._choice_interrupt_message = "检测到需要做出选择，已暂停执行并等待用户选择。"
 
         llm_config = load_llm_config()
         if not llm_config.api_key:
@@ -95,11 +107,29 @@ class ReActMemoryAgent:
             for item in self._loaded_skills
         ]
         self._set_runtime_prompt(prompt)
+        self._approval_interrupt_requested = False
+        self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
+        self._choice_interrupt_requested = False
+        self._choice_interrupt_message = "检测到需要做出选择，已暂停执行并等待用户选择。"
 
         try:
-            reply_msg = self._run_async(
+            reply_msg = self._run_async_with_interrupt(
                 self._agent.reply(
                     Msg(name="user", content=user_message, role="user"))
+            )
+        except ApprovalInterrupt as exc:
+            return AgentResponse(
+                text=str(exc) or "检测到需要人工审批，已暂停执行。",
+                tool_calls=list(self._active_tool_traces),
+                loaded_skills=list(self._loaded_skills),
+                activity_traces=list(self._active_activity_traces),
+            )
+        except ChoiceInterrupt as exc:
+            return AgentResponse(
+                text=str(exc) or "检测到需要做出选择，已暂停执行。",
+                tool_calls=list(self._active_tool_traces),
+                loaded_skills=list(self._loaded_skills),
+                activity_traces=list(self._active_activity_traces),
             )
         except Exception:
             return AgentResponse(text=self._fallback.respond(user_message, memory_context), tool_calls=[])
@@ -269,6 +299,66 @@ class ReActMemoryAgent:
                 output = f"error: {exc}"
             self._record_tool_trace(
                 "bash_command", input_payload, output)
+            if isinstance(output, str) and output.startswith("__APPROVAL_REQUIRED__"):
+                self._approval_interrupt_requested = True
+                self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
+                raise ApprovalInterrupt("检测到需要人工审批，已暂停执行并等待审批结果。")
+            return self._to_tool_response(output)
+
+        def ask_human_choice(question: str, options: str = "", allow_custom: bool = True) -> ToolResponse:
+            """Create a human-choice request when uncertain. options can be comma-separated or newline-separated."""
+            input_payload = {
+                "question": question,
+                "options": options,
+                "allow_custom": allow_custom,
+            }
+            try:
+                normalized = [
+                    item.strip()
+                    for item in re.split(r"[\n,]", options)
+                    if item.strip()
+                ]
+                choice = self.memory_store.create_pending_choice(
+                    self.user_id,
+                    self.session_id,
+                    {
+                        "type": "choice",
+                        "question": question.strip(),
+                        "options": normalized,
+                        "allow_custom": bool(allow_custom),
+                    },
+                )
+                payload = {
+                    "request_id": choice.get("request_id", ""),
+                    "question": question.strip(),
+                    "options": normalized,
+                    "allow_custom": bool(allow_custom),
+                }
+                output = "__CHOICE_REQUIRED__" + \
+                    json.dumps(payload, ensure_ascii=False)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("ask_human_choice", input_payload, output)
+            if isinstance(output, str) and output.startswith("__CHOICE_REQUIRED__"):
+                self._choice_interrupt_requested = True
+                self._choice_interrupt_message = "检测到需要做出选择，已暂停执行并等待用户选择。"
+                raise ChoiceInterrupt("检测到需要做出选择，已暂停执行并等待用户选择。")
+            return self._to_tool_response(output)
+
+        def compact_context(summary: str) -> ToolResponse:
+            """Update per-session compact memory. Pass concise, merged context summary; empty string clears it."""
+            input_payload = {"summary": summary}
+            try:
+                text = str(summary).strip()
+                self.memory_store.update_session_state(
+                    self.user_id,
+                    self.session_id,
+                    {"session_memory": text},
+                )
+                output = "session memory updated" if text else "session memory cleared"
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("compact_context", input_payload, output)
             return self._to_tool_response(output)
 
         toolkit.register_tool_function(remember_note)
@@ -278,6 +368,8 @@ class ReActMemoryAgent:
         toolkit.register_tool_function(search_daily)
         toolkit.register_tool_function(get_daily_window)
         toolkit.register_tool_function(bash_command)
+        toolkit.register_tool_function(ask_human_choice)
+        toolkit.register_tool_function(compact_context)
         self._register_user_skills(toolkit)
         return toolkit
 
@@ -285,58 +377,7 @@ class ReActMemoryAgent:
         text = command.strip()
         if not text:
             return False, "empty command"
-
-        # Only disallow actual path traversal segments outside shell quotes.
-        if self._contains_path_traversal(text, ignore_quoted=True):
-            return False, "unsafe token: .."
-
         return True, ""
-
-    def _contains_path_traversal(self, text: str, ignore_quoted: bool) -> bool:
-        if ignore_quoted:
-            text = self._strip_quoted_text(text)
-        return re.search(r'(^|[\s\\/])\.\.([\\/]|$)', text) is not None
-
-    def _strip_quoted_text(self, text: str) -> str:
-        result: list[str] = []
-        quote_char: str | None = None
-        escaped = False
-
-        for char in text:
-            if escaped:
-                result.append(" ")
-                escaped = False
-                continue
-
-            if quote_char is None:
-                if char == "\\":
-                    result.append(" ")
-                    escaped = True
-                elif char in {'"', "'", "`"}:
-                    result.append(" ")
-                    quote_char = char
-                else:
-                    result.append(char)
-                continue
-
-            if quote_char == "'":
-                if char == quote_char:
-                    result.append(" ")
-                    quote_char = None
-                else:
-                    result.append(" ")
-                continue
-
-            if char == "\\":
-                result.append(" ")
-                escaped = True
-            elif char == quote_char:
-                result.append(" ")
-                quote_char = None
-            else:
-                result.append(" ")
-
-        return "".join(result)
 
     def _expand_bash_aliases(self, command: str) -> str:
         root_work_dir = self._root_work_dir().resolve().as_posix()
@@ -375,9 +416,7 @@ class ReActMemoryAgent:
         return [arg for arg in args if arg and not arg.startswith("-")]
 
     def _validate_bash_path(self, raw_path: str) -> tuple[bool, str]:
-        # Path validation now only checks for actual traversal segments.
-        if self._contains_path_traversal(raw_path, ignore_quoted=False):
-            return False, "unsafe token: .."
+        _ = raw_path
         return True, ""
 
     def _allowed_bash_dirs(self) -> list[Path]:
@@ -415,12 +454,43 @@ class ReActMemoryAgent:
         return candidate
 
     def _run_bash_command(self, command: str) -> str:
+        return self._run_bash_command_internal(command, skip_approval=False)
+
+    def run_bash_command_after_approval(self, command: str) -> str:
+        """Execute a previously approved command without re-entering approval gate."""
+        return self._run_bash_command_internal(command, skip_approval=True)
+
+    def _run_bash_command_internal(self, command: str, skip_approval: bool = False) -> str:
         ok, reason = self._validate_bash_command(command)
         if not ok:
             return (
                 "error: unsafe bash command "
                 f"({reason}). Avoid '..' in paths."
             )
+
+        if not skip_approval:
+            decision = self._evaluate_bash_policy(command)
+            action = str(decision.get("action", "allow"))
+            if action == "deny":
+                return f"error: command denied by policy ({decision.get('reason', 'blocked')})"
+            if action == "ask_human":
+                approval = self.memory_store.create_pending_approval(
+                    self.user_id,
+                    self.session_id,
+                    {
+                        "type": "bash_command",
+                        "command": command,
+                        "operation": str(decision.get("operation", "unknown")),
+                        "reason": str(decision.get("reason", "requires human approval")),
+                    },
+                )
+                payload = {
+                    "request_id": approval.get("request_id", ""),
+                    "command": command,
+                    "operation": str(decision.get("operation", "unknown")),
+                    "reason": str(decision.get("reason", "requires human approval")),
+                }
+                return "__APPROVAL_REQUIRED__" + json.dumps(payload, ensure_ascii=False)
 
         work_dir = self._root_work_dir()
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -454,6 +524,164 @@ class ReActMemoryAgent:
         # Convert absolute paths in stdout back to root/ format for LLM.
         output = stdout[:100000] if stdout else "ok"
         return self._rewrite_output_paths(output, work_dir)
+
+    def _evaluate_bash_policy(self, command: str) -> dict[str, str]:
+        policy = self.memory_store.get_command_policy(self.user_id)
+        if not bool(policy.get("enabled", True)):
+            return {"action": "allow", "operation": "read", "reason": "policy disabled"}
+
+        command_name = self._extract_command_name(command)
+        operation = self._classify_command_operation(command)
+        allowlist = {
+            str(item).strip().lower()
+            for item in policy.get("command_allowlist", [])
+            if str(item).strip()
+        }
+        blocklist = {
+            str(item).strip().lower()
+            for item in policy.get("command_blocklist", [])
+            if str(item).strip()
+        }
+
+        if command_name and command_name in blocklist:
+            return {"action": "deny", "operation": operation, "reason": f"{command_name} in blocklist"}
+
+        if allowlist and command_name and command_name not in allowlist:
+            return {
+                "action": "ask_human",
+                "operation": operation,
+                "reason": f"{command_name} not in allowlist",
+            }
+
+        allowed_paths = policy.get("allowed_paths") if isinstance(
+            policy.get("allowed_paths"), list) else []
+        if operation in {"read", "write", "delete"} and self._paths_are_allowed(command, allowed_paths):
+            return {
+                "action": "allow",
+                "operation": operation,
+                "reason": "command paths in allowed_paths",
+            }
+
+        operations = policy.get("operations") if isinstance(
+            policy.get("operations"), dict) else {}
+        configured = str(operations.get(operation, policy.get(
+            "default_action", "ask_human"))).strip().lower()
+        if configured not in {"allow", "ask_human", "deny"}:
+            configured = "ask_human"
+        return {
+            "action": configured,
+            "operation": operation,
+            "reason": f"operation {operation} policy",
+        }
+
+    def _extract_command_name(self, command: str) -> str:
+        text = command.strip()
+        if not text:
+            return ""
+        match = re.match(r"^[A-Za-z0-9_.-]+", text)
+        if not match:
+            return ""
+        return match.group(0).lower()
+
+    def _classify_command_operation(self, command: str) -> str:
+        text = command.strip().lower()
+        if not text:
+            return "read"
+
+        command_name = self._extract_command_name(command)
+        if command_name in {
+            "python", "python3", "bash", "sh", "zsh", "node", "npm", "pnpm", "yarn", "uv", "uvx",
+        }:
+            return "exec"
+
+        delete_patterns = [r"\brm\b", r"\b-delete\b"]
+        for pattern in delete_patterns:
+            if re.search(pattern, text):
+                return "delete"
+
+        write_patterns = [
+            r">", r"\btee\b", r"\bsed\s+-i\b", r"\bawk\b.*\b-i\b", r"\bperl\b.*\b-i\b",
+            r"\bmv\b", r"\bcp\b", r"\btouch\b", r"\bmkdir\b",
+        ]
+        for pattern in write_patterns:
+            if re.search(pattern, text):
+                return "write"
+
+        return "read"
+
+    def _paths_are_allowed(self, command: str, allowed_paths: list[Any]) -> bool:
+        normalized_allow = [
+            self._normalize_policy_path(str(item))
+            for item in allowed_paths
+            if str(item).strip()
+        ]
+        allow_dirs = [item for item in normalized_allow if item is not None]
+        if not allow_dirs:
+            return False
+
+        command_paths = self._extract_command_paths_for_policy(command)
+        if not command_paths:
+            return False
+
+        for target in command_paths:
+            if not any(self._is_path_under(target, base) for base in allow_dirs):
+                return False
+        return True
+
+    def _extract_command_paths_for_policy(self, command: str) -> list[Path]:
+        text = command.strip()
+        if not text:
+            return []
+
+        tokens = re.findall(r'"[^\"]+"|\'[^\']+\'|[^\s]+', text)
+        result: list[Path] = []
+        for token in tokens[1:]:
+            value = token.strip().strip('"\'')
+            if not value or value.startswith("-"):
+                continue
+            if any(op in value for op in ["|", "&&", ";"]):
+                continue
+            if value in {">", ">>", "<", "<<"}:
+                continue
+            if "*" in value or "?" in value:
+                continue
+            if "/" not in value and "\\" not in value and not value.startswith("."):
+                continue
+            normalized = self._normalize_policy_path(value)
+            if normalized is not None:
+                result.append(normalized)
+        return result
+
+    def _normalize_policy_path(self, raw_path: str) -> Path | None:
+        text = raw_path.strip()
+        if not text:
+            return None
+
+        root_dir = self._root_work_dir().resolve()
+        sandbox_dir = self._default_sandbox_dir().resolve()
+
+        try:
+            if text == "root" or text.startswith("root/"):
+                suffix = text[4:].lstrip("/")
+                return (root_dir / suffix).resolve()
+            if text == ".sandbox" or text.startswith(".sandbox/"):
+                suffix = text[8:].lstrip("/")
+                return (sandbox_dir / suffix).resolve()
+
+            p = Path(text)
+            if p.is_absolute():
+                return p.resolve()
+
+            return (root_dir / p).resolve()
+        except Exception:
+            return None
+
+    def _is_path_under(self, target: Path, base: Path) -> bool:
+        try:
+            target.relative_to(base)
+            return True
+        except ValueError:
+            return False
 
     def _rewrite_output_paths(self, output: str, work_dir: Path) -> str:
         """Rewrite absolute work_dir paths back to root/ format."""
@@ -680,6 +908,29 @@ class ReActMemoryAgent:
                 future = executor.submit(lambda: asyncio.run(coro))
                 return future.result()
 
+    async def _await_with_interrupt(self, coro: Any) -> Any:
+        task = asyncio.create_task(coro)
+        while not task.done():
+            if self._approval_interrupt_requested:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise ApprovalInterrupt(self._approval_interrupt_message)
+            if self._choice_interrupt_requested:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise ChoiceInterrupt(self._choice_interrupt_message)
+            await asyncio.sleep(0.01)
+        return await task
+
+    def _run_async_with_interrupt(self, coro: Any) -> Any:
+        return self._run_async(self._await_with_interrupt(coro))
+
     def _set_runtime_prompt(self, prompt: str) -> None:
         # AgentScope exposes sys_prompt as read-only; update its backing field when available.
         if hasattr(self._agent, "_sys_prompt"):
@@ -700,28 +951,47 @@ class ReActMemoryAgent:
 
     def build_system_prompt(self, memory_context: str) -> str:
         return (
-            "你是一个带记忆的助手。你会优先遵守长期记忆中的稳定偏好。\n"
-            "当用户信息有新增或变化时，你可以调用 remember_note。\n"
-            "默认只给你最近 session 上下文；如果需要更早的 session 或 daily 历史，必须主动调用搜索工具检索。\n"
-            "工具使用总原则：优先调用工具，能调用工具就调用工具；只要工具可以提供事实依据，就必须先调用再回答。\n"
-            "只有在工具确实无法解决问题时，才允许不调用工具并直接给出说明。\n"
+            "<ROLE>你是一个带记忆的助手，会优先遵守长期记忆中的稳定偏好。</ROLE>\n"
+            "<MISSION>在最少猜测下给出可验证、可追溯的回答与帮助。</MISSION>\n\n"
+            "<MEMORY_RULES>\n"
+            "1) 当用户信息有新增或变化时，你可以调用 remember_note。\n"
+            "2) remember_note 的 note 必须是 memory.md 的完整版本，不是增量补丁。\n"
+            "3) 完整版本必须保留旧信息（仍然有效的部分）并融合最新变化。\n"
+            "4) 若新信息明确否定旧偏好，应替换冲突项，避免并存冲突表述。\n"
+            "</MEMORY_RULES>\n\n"
+            "<TOOL_POLICY>\n"
+            "工具使用总原则：优先调用工具，能调用工具就调用工具；只要工具可提供事实依据，必须先调用再回答。\n"
+            "只有在工具确实无法解决问题时，才允许不调用工具并直接说明原因。\n"
             "禁止仅凭猜测回答可被工具验证的问题。\n"
-            "search_session 和 search_daily 会返回 message_id；如果命中内容前后还需要更多上下文，使用 get_session_window(message_id, before, after) 扩展。\n"
-            "daily 也支持同样的窗口扩展：get_daily_window(message_id, before, after, day)。\n"
-            "关键规则：remember_note 的 note 必须是 memory.md 的完整版本，不是增量补丁。\n"
-            "你写入的完整版本必须保留旧信息（仍然有效的部分）并融合最新变化，避免只写最新一条导致旧特征丢失。\n"
-            "如果某条旧偏好被新信息明确否定，要在完整版本中替换该条而不是并存冲突表述。\n\n"
-            "当需要读取或修改技能文件时，必须使用 bash_command。\n"
-            "bash_command 在工作目录内执行；禁止使用 .. 进行路径遍历。\n"
-            "bash_command 输入不做字符数限制；输出最多保留100000字符。\n"
-            "读取文件时尽量不要一次读取大段内容，优先按需分段读取。\n"
-            "路径约定：\n"
+            "当你对用户偏好或方案拿不准时，调用 ask_human_choice 给出候选选项。\n"
+            "ask_human_choice 的 options 请给 2-5 个简短选项，并允许用户自定义输入。\n"
+            "当会话变长、上下文冗余时，调用 compact_context 将当前有效上下文压缩为会话记忆。\n"
+            "</TOOL_POLICY>\n\n"
+            "<CONTEXT_RETRIEVAL>\n"
+            "默认只给最近 session 上下文；若需要更早 session 或 daily 历史，必须先搜索。\n"
+            "search_session 与 search_daily 会返回 message_id。\n"
+            "命中后如需扩展上下文，使用 get_session_window(message_id, before, after)。\n"
+            "daily 同理使用 get_daily_window(message_id, before, after, day)。\n"
+            "</CONTEXT_RETRIEVAL>\n\n"
+            "<BASH_POLICY>\n"
+            "需要读取或修改技能文件时，必须使用 bash_command。\n"
+            "执行流程必须遵循：搜索优先 -> 最小读取 -> 再修改。\n"
+            "优先用搜索命令定位目标（如 rg、grep）；不要无搜索直接大段读取。\n"
+            "每次读取都要有明确目的，按需最小读取，避免一次读取整文件。\n"
+            "在 Bash 里需要精确替换部分内容时，优先使用 sed（行级/范围替换）、awk（条件替换）、perl（复杂模式）。\n"
+            "非必要不要替换整个文件。\n"
+            "bash_command 在工作目录内执行。\n"
+            "bash_command 输出最多保留100000字符。\n"
+            "可使用分段读取进一步控制上下文规模。\n"
+            "默认策略下：读操作可直接执行；写/删/执行操作需要人工审批（除非用户配置覆盖）。\n"
+            "</BASH_POLICY>\n\n"
+            "<PATHS>\n"
             "root/ 表示工作目录，例：cat root/README.md\n"
             ".sandbox/ 表示项目根目录的 .sandbox 目录，例：cat .sandbox/skills/demo-user/SKILL.md\n"
-            "bash 的返回值中的绝对路径会被转换为 root/ 格式。\n"
-            "支持管道、重定向等标准 bash 语法。\n\n"
-            f"当前用户ID: {self.user_id}\n\n"
-            f"可用记忆上下文:\n{memory_context}"
+            "bash 返回值中的绝对路径会被转换为 root/ 格式。\n"
+            "</PATHS>\n\n"
+            f"<USER>当前用户ID: {self.user_id}</USER>\n\n"
+            f"<MEMORY>可用记忆上下文:\n{memory_context}</MEMORY>"
         )
 
 
@@ -730,6 +1000,7 @@ class ConversationTitleGenerator:
         self._config = load_llm_config()
 
     def generate_title(self, user_message: str, assistant_reply: str) -> str:
+        _ = assistant_reply
         if not self._config.api_key:
             return self._fallback(user_message)
 
@@ -737,9 +1008,8 @@ class ConversationTitleGenerator:
             model = self._build_chat_model()
             formatter = OpenAIChatFormatter()
             prompt = (
-                "请根据以下对话生成一个简短中文会话标题（不超过12字，不要标点和引号）。\n"
-                f"用户: {user_message}\n"
-                f"助手: {assistant_reply}\n"
+                "请仅根据用户第一条消息生成一个简短中文会话标题（不超过12字，不要标点和引号）。\n"
+                f"用户第一条消息: {user_message}\n"
                 "只输出标题本身。"
             )
             formatted_messages = self._run_async(

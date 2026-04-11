@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "default_action": "ask_human",
+  "operations": {
+    "read": "ask_human",
+    "write": "ask_human",
+    "delete": "ask_human",
+    "exec": "ask_human"
+  },
+  "allowed_paths": [],
+  "command_allowlist": [],
+  "command_blocklist": []
+}

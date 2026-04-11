@@ -2,10 +2,14 @@ skills:
 - name: memory-tools
   enabled: false
 - name: reply-style
-  enabled: true
+  enabled: false
 - name: cooking-skill
   enabled: false
 - name: self-improving-agent
-  enabled: true
+  enabled: false
 - name: weather
-  enabled: true
+  enabled: false
+- name: humanizer
+  enabled: false
+- name: multi-search-engine
+  enabled: false

@@ -1,0 +1,10 @@
+{
+  "4776d3acce72": {
+    "request_id": "4776d3acce72",
+    "created_at": "2026-04-11T20:00:41",
+    "type": "bash_command",
+    "command": "ls -la .sandbox/skills/demo-user/",
+    "operation": "read",
+    "reason": "operation read policy"
+  }
+}

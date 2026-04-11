@@ -3,10 +3,27 @@ from __future__ import annotations
 import json
 import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+
+DEFAULT_COMMAND_POLICY: dict[str, Any] = {
+    "enabled": True,
+    "default_action": "ask_human",
+    "operations": {
+        "read": "allow",
+        "write": "ask_human",
+        "delete": "ask_human",
+        "exec": "ask_human",
+    },
+    "allowed_paths": [],
+    "command_allowlist": [],
+    "command_blocklist": [],
+}
 
 
 @dataclass
@@ -14,12 +31,24 @@ class MemoryContext:
     session_messages: list[dict[str, Any]]
     daily_messages: list[dict[str, Any]]
     long_term_hits: list[dict[str, Any]]
+    session_memory: str = ""
 
 
 class MemoryStore:
-    def __init__(self, root_dir: Path | str = "memory") -> None:
+    def __init__(
+        self,
+        root_dir: Path | str = "memory",
+        command_policy_root_dir: Path | str | None = None,
+    ) -> None:
         self.root_dir = Path(root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        if command_policy_root_dir is None:
+            if self.root_dir.name.lower() == "memory":
+                self.command_policy_root_dir = self.root_dir.parent / "config"
+            else:
+                self.command_policy_root_dir = self.root_dir / "config"
+        else:
+            self.command_policy_root_dir = Path(command_policy_root_dir)
 
     def append_session_message(
         self,
@@ -35,6 +64,7 @@ class MemoryStore:
             role=role, content=content, tags=["session"], meta=meta)
         payload["message_id"] = next_message_id
         self._append_jsonl(file_path, payload)
+        self._append_session_memory_entry(user_id, session_id, payload)
 
     def append_daily_message(
         self,
@@ -226,6 +256,181 @@ class MemoryStore:
         self.set_long_term_memory(user_id, "\n".join(remained))
         return True
 
+    def get_user_settings(self, user_id: str) -> dict[str, Any]:
+        return self._read_json(self._settings_file(user_id))
+
+    def set_user_settings(self, user_id: str, settings: dict[str, Any]) -> None:
+        normalized = settings if isinstance(settings, dict) else {}
+        self._write_json(self._settings_file(user_id), normalized)
+
+    def get_command_policy(self, user_id: str) -> dict[str, Any]:
+        stored_policy = self._read_json(self._command_policy_file(user_id))
+        if not stored_policy:
+            stored_policy = self._read_json(
+                self._legacy_command_policy_file(user_id))
+        if isinstance(stored_policy, dict) and stored_policy:
+            return self._merge_command_policy(stored_policy)
+
+        settings = self.get_user_settings(user_id)
+        raw_policy = settings.get("command_policy") if isinstance(
+            settings, dict) else {}
+        policy = self._merge_command_policy(
+            raw_policy if isinstance(raw_policy, dict) else {})
+        return policy
+
+    def set_command_policy(self, user_id: str, policy: dict[str, Any]) -> None:
+        self._write_json(
+            self._command_policy_file(user_id),
+            self._merge_command_policy(policy),
+        )
+
+    def create_pending_approval(
+        self,
+        user_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        path = self._approvals_file(user_id, session_id)
+        rows = self._read_json(path)
+        request_id = uuid4().hex[:12]
+        item = {
+            "request_id": request_id,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            **(payload if isinstance(payload, dict) else {}),
+        }
+        rows[request_id] = item
+        self._write_json(path, rows)
+        return item
+
+    def pop_pending_approval(self, user_id: str, session_id: str, request_id: str) -> dict[str, Any] | None:
+        req = request_id.strip()
+        if not req:
+            return None
+        path = self._approvals_file(user_id, session_id)
+        rows = self._read_json(path)
+        value = rows.pop(req, None)
+        self._write_json(path, rows)
+        return value if isinstance(value, dict) else None
+
+    def replace_approval_placeholder_output(
+        self,
+        user_id: str,
+        session_id: str,
+        request_id: str,
+        output: str,
+    ) -> bool:
+        req = request_id.strip()
+        if not req:
+            return False
+
+        replaced = False
+        session_path = self._session_file(user_id, session_id)
+        if self._replace_approval_placeholder_in_jsonl(session_path, req, output):
+            replaced = True
+
+        daily_path = self._daily_file(user_id)
+        if self._replace_approval_placeholder_in_jsonl(daily_path, req, output):
+            replaced = True
+
+        return replaced
+
+    def create_pending_choice(
+        self,
+        user_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        path = self._choices_file(user_id, session_id)
+        rows = self._read_json(path)
+        raw_payload = payload if isinstance(payload, dict) else {}
+        request_id = str(raw_payload.get("request_id", "")
+                         ).strip() or uuid4().hex[:12]
+        item = {
+            "request_id": request_id,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            **raw_payload,
+        }
+        rows[request_id] = item
+        self._write_json(path, rows)
+        return item
+
+    def pop_pending_choice(self, user_id: str, session_id: str, request_id: str) -> dict[str, Any] | None:
+        req = request_id.strip()
+        if not req:
+            return None
+        path = self._choices_file(user_id, session_id)
+        rows = self._read_json(path)
+        value = rows.pop(req, None)
+        self._write_json(path, rows)
+        return value if isinstance(value, dict) else None
+
+    def get_pending_approvals(self, user_id: str, session_id: str) -> list[dict[str, Any]]:
+        """Get all pending approvals for a session without removing them."""
+        path = self._approvals_file(user_id, session_id)
+        rows = self._read_json(path)
+        return [item for item in rows.values() if isinstance(item, dict)]
+
+    def get_pending_choices(self, user_id: str, session_id: str) -> list[dict[str, Any]]:
+        """Get all pending choices for a session without removing them."""
+        path = self._choices_file(user_id, session_id)
+        rows = self._read_json(path)
+        return [item for item in rows.values() if isinstance(item, dict)]
+
+    def get_session_state(self, user_id: str, session_id: str) -> dict[str, Any]:
+        path = self._session_state_file(user_id, session_id)
+        data = self._read_json(path)
+        return data if isinstance(data, dict) else {}
+
+    def update_session_state(self, user_id: str, session_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        path = self._session_state_file(user_id, session_id)
+        current = self._read_json(path)
+        if not isinstance(current, dict):
+            current = {}
+        if isinstance(patch, dict):
+            current.update(patch)
+        self._write_json(path, current)
+        return current
+
+    def set_pending_react_state(
+        self,
+        user_id: str,
+        session_id: str,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        req = request_id.strip()
+        if not req:
+            return
+        data = payload if isinstance(payload, dict) else {}
+        self.update_session_state(
+            user_id,
+            session_id,
+            {
+                "pending_approval_request_id": req,
+                "approval_resume_state": data,
+            },
+        )
+
+    def pop_pending_react_state(self, user_id: str, session_id: str, request_id: str) -> dict[str, Any] | None:
+        req = request_id.strip()
+        if not req:
+            return None
+        state = self.get_session_state(user_id, session_id)
+        current_req = str(state.get("pending_approval_request_id", "")).strip()
+        if current_req != req:
+            return None
+
+        value = state.get("approval_resume_state")
+        self.update_session_state(
+            user_id,
+            session_id,
+            {
+                "pending_approval_request_id": "",
+                "approval_resume_state": {},
+            },
+        )
+        return value if isinstance(value, dict) else None
+
     def load_context(
         self,
         user_id: str,
@@ -257,10 +462,18 @@ class MemoryStore:
         long_term_hits: list[dict[str, Any]] = []
         if long_term_text:
             long_term_hits = [{"content": long_term_text}]
+        session_state = self.get_session_state(user_id, session_id)
+        session_memory_raw = str(
+            session_state.get("session_memory", "")).strip()
+        session_memory = self._tail_text_by_token_budget(
+            session_memory_raw,
+            token_budget=max(1, session_token_budget // 2),
+        )
         return MemoryContext(
             session_messages=session_messages,
             daily_messages=daily_messages,
             long_term_hits=long_term_hits,
+            session_memory=session_memory,
         )
 
     def build_prompt_context(self, memory_context: MemoryContext) -> str:
@@ -279,6 +492,10 @@ class MemoryStore:
             lines.append("[LONG_TERM]")
             for row in memory_context.long_term_hits:
                 lines.append(f"{row['content']}")
+
+        if memory_context.session_memory:
+            lines.append("[SESSION_MEMORY]")
+            lines.append(memory_context.session_memory)
 
         return "\n".join(lines)
 
@@ -315,6 +532,36 @@ class MemoryStore:
         other_chars = max(0, len(text) - chinese_chars)
         return max(1, chinese_chars + math.ceil(other_chars / 4))
 
+    def _tail_text_by_token_budget(self, text: str, token_budget: int) -> str:
+        raw = str(text or "")
+        if not raw.strip():
+            return ""
+
+        safe_budget = max(1, token_budget)
+        if self._estimate_text_tokens(raw) <= safe_budget:
+            return raw.strip()
+
+        lines = [line for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        selected: list[str] = []
+        used = 0
+        for line in reversed(lines):
+            cost = self._estimate_text_tokens(line)
+            if selected and used + cost > safe_budget:
+                break
+            selected.append(line)
+            used += cost
+        selected.reverse()
+        return "\n".join(selected).strip()
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        content = str(text or "")
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", content))
+        other_chars = max(0, len(content) - chinese_chars)
+        return max(1, chinese_chars + math.ceil(other_chars / 4))
+
     def _message_payload(
         self,
         role: str,
@@ -346,6 +593,27 @@ class MemoryStore:
     def _llm_log_file(self, user_id: str) -> Path:
         return self._user_root(user_id) / "logs" / "llm_dialogue.jsonl"
 
+    def _settings_file(self, user_id: str) -> Path:
+        return self._user_root(user_id) / "settings.json"
+
+    def _approvals_file(self, user_id: str, session_id: str) -> Path:
+        return self._user_root(user_id) / "approvals" / f"{session_id}.json"
+
+    def _choices_file(self, user_id: str, session_id: str) -> Path:
+        return self._user_root(user_id) / "choices" / f"{session_id}.json"
+
+    def _session_state_file(self, user_id: str, session_id: str) -> Path:
+        return self._user_root(user_id) / "session_memory" / f"{session_id}.json"
+
+    def _react_state_file(self, user_id: str, session_id: str) -> Path:
+        return self._user_root(user_id) / "react_state" / f"{session_id}.json"
+
+    def _command_policy_file(self, user_id: str) -> Path:
+        return self.command_policy_root_dir / user_id / "command_policy.json"
+
+    def _legacy_command_policy_file(self, user_id: str) -> Path:
+        return self.command_policy_root_dir / "command_policies" / f"{user_id}.json"
+
     def _conversation_file(self, user_id: str) -> Path:
         return self._user_root(user_id) / "conversations.json"
 
@@ -353,6 +621,50 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _append_session_memory_entry(self, user_id: str, session_id: str, message: dict[str, Any]) -> None:
+        approval_marker = "__APPROVAL_REQUIRED__"
+        choice_marker = "__CHOICE_REQUIRED__"
+        if not isinstance(message, dict):
+            return
+
+        role = str(message.get("role", "")).strip() or "assistant"
+        content = str(message.get("content", "")).strip()
+        lines: list[str] = []
+        if content:
+            lines.append(f"{role}: {content}")
+
+        meta = message.get("meta") if isinstance(
+            message.get("meta"), dict) else {}
+        raw_tool_calls = meta.get(
+            "tool_calls") if isinstance(meta, dict) else []
+        if isinstance(raw_tool_calls, list):
+            for item in raw_tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip() or "tool"
+                tool_input = str(item.get("input", "")).strip()
+                tool_output = str(item.get("output", "")).strip()
+                if tool_output.startswith(approval_marker) or tool_output.startswith(choice_marker):
+                    continue
+                lines.append(f"[tool] {name}")
+                if tool_input:
+                    lines.append(f"输入: {tool_input}")
+                if tool_output:
+                    lines.append(f"输出: {tool_output}")
+
+        if not lines:
+            return
+
+        entry = "\n".join(lines)
+        state = self.get_session_state(user_id, session_id)
+        previous = str(state.get("session_memory", "")).strip()
+        merged = f"{previous}\n{entry}".strip() if previous else entry
+        self.update_session_state(
+            user_id,
+            session_id,
+            {"session_memory": merged},
+        )
 
     def _next_message_id(self, rows: list[dict[str, Any]]) -> int:
         next_message_id = 1
@@ -374,6 +686,109 @@ class MemoryStore:
                     continue
                 rows.append(json.loads(line))
         return rows
+
+    def _write_jsonl(self, path: Path, rows: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _replace_approval_placeholder_in_jsonl(
+        self,
+        path: Path,
+        request_id: str,
+        output: str,
+    ) -> bool:
+        marker = "__APPROVAL_REQUIRED__"
+        rows = self._read_jsonl(path)
+        if not rows:
+            return False
+
+        for row_index in range(len(rows) - 1, -1, -1):
+            row = rows[row_index]
+            if str(row.get("role", "")) != "assistant":
+                continue
+
+            meta = row.get("meta")
+            if not isinstance(meta, dict):
+                continue
+
+            raw_tool_calls = meta.get("tool_calls")
+            if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+                continue
+
+            changed = False
+            next_tool_calls: list[dict[str, Any]] = []
+            for item in raw_tool_calls:
+                if not isinstance(item, dict):
+                    next_tool_calls.append(item)
+                    continue
+
+                tool_name = str(item.get("name", ""))
+                tool_output = str(item.get("output", ""))
+                if tool_name != "bash_command" or not tool_output.startswith(marker):
+                    next_tool_calls.append(item)
+                    continue
+
+                payload_text = tool_output[len(marker):].strip()
+                try:
+                    payload = json.loads(payload_text)
+                except Exception:
+                    next_tool_calls.append(item)
+                    continue
+
+                if str(payload.get("request_id", "")).strip() != request_id:
+                    next_tool_calls.append(item)
+                    continue
+
+                updated = dict(item)
+                updated["output"] = output
+                next_tool_calls.append(updated)
+                changed = True
+
+            if not changed:
+                continue
+
+            next_meta = dict(meta)
+            next_meta["tool_calls"] = next_tool_calls
+
+            raw_activity_traces = meta.get("activity_traces")
+            if isinstance(raw_activity_traces, list) and raw_activity_traces:
+                next_activity_traces: list[dict[str, Any]] = []
+                for trace in raw_activity_traces:
+                    if not isinstance(trace, dict):
+                        next_activity_traces.append(trace)
+                        continue
+
+                    trace_type = str(trace.get("type", ""))
+                    trace_name = str(trace.get("name", ""))
+                    trace_output = str(trace.get("output", ""))
+                    if trace_type == "tool" and trace_name == "bash_command" and trace_output.startswith(marker):
+                        payload_text = trace_output[len(marker):].strip()
+                        try:
+                            payload = json.loads(payload_text)
+                        except Exception:
+                            next_activity_traces.append(trace)
+                            continue
+                        if str(payload.get("request_id", "")).strip() != request_id:
+                            next_activity_traces.append(trace)
+                            continue
+                        updated_trace = dict(trace)
+                        updated_trace["output"] = output
+                        next_activity_traces.append(updated_trace)
+                    else:
+                        next_activity_traces.append(trace)
+                next_meta["activity_traces"] = next_activity_traces
+
+            next_row = dict(row)
+            next_row["meta"] = next_meta
+            rows[row_index] = next_row
+            self._write_jsonl(path, rows)
+            return True
+
+        return False
 
     def _normalize_message_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized_rows: list[dict[str, Any]] = []
@@ -451,3 +866,38 @@ class MemoryStore:
 
     def _tokens(self, text: str) -> list[str]:
         return re.findall(r"[\w\u4e00-\u9fff]+", text.lower())
+
+    def _merge_command_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        merged = deepcopy(DEFAULT_COMMAND_POLICY)
+        if not isinstance(policy, dict):
+            return merged
+
+        if "enabled" in policy:
+            merged["enabled"] = bool(policy.get("enabled", True))
+
+        if isinstance(policy.get("default_action"), str):
+            merged["default_action"] = str(
+                policy.get("default_action") or "ask_human")
+
+        operations = policy.get("operations")
+        if isinstance(operations, dict):
+            for key in ["read", "write", "delete", "exec"]:
+                if isinstance(operations.get(key), str) and operations.get(key):
+                    merged["operations"][key] = str(operations[key])
+
+        allowlist = policy.get("command_allowlist")
+        if isinstance(allowlist, list):
+            merged["command_allowlist"] = [
+                str(item).strip() for item in allowlist if str(item).strip()]
+
+        blocklist = policy.get("command_blocklist")
+        if isinstance(blocklist, list):
+            merged["command_blocklist"] = [
+                str(item).strip() for item in blocklist if str(item).strip()]
+
+        allowed_paths = policy.get("allowed_paths")
+        if isinstance(allowed_paths, list):
+            merged["allowed_paths"] = [
+                str(item).strip() for item in allowed_paths if str(item).strip()]
+
+        return merged

@@ -222,6 +222,15 @@ def test_frontend_has_settings_view_for_memory_and_skills() -> None:
     assert 'id="backToChatBtn"' in html
 
 
+def test_frontend_has_skill_upload_controls() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert 'id="skillUploadFile"' in html
+    assert 'id="skillUploadBtn"' in html
+    assert "上传 Skill ZIP" in html
+
+
 def test_frontend_memory_textarea_uses_full_panel_height_layout() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")
@@ -252,3 +261,41 @@ def test_frontend_avatar_uses_initials_of_each_word() -> None:
     assert "replace(/([a-z])([A-Z])/g, '$1 $2')" in html
     assert "split(/[^a-zA-Z0-9]+/)" in html
     assert "slice(0, 2)" in html
+
+
+def test_frontend_choice_custom_submit_button_prevents_text_wrap() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "customInput.className = 'flex-1 min-w-0 border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm';" in html
+    assert "customSubmit.className = 'secondary-btn shrink-0 whitespace-nowrap min-w-24';" in html
+
+
+def test_frontend_choice_submit_renders_user_choice_message() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "const finalChoice = customInputText || selectedOption;" in html
+    assert "const choiceMessage = question" in html
+    assert "const pendingChoiceMsgEl = addMsg('u', choiceMessage, false);" in html
+    assert "pendingChoiceMsgEl.dataset.pendingChoice = '1';" in html
+    assert "pendingChoiceMsgEl.remove();" in html
+
+
+def test_frontend_approval_submit_renders_status_and_tracks_completed_requests() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "let completedRequestIds = new Set();" in html
+    assert "function markRequestCompleted(requestId)" in html
+    assert "function unmarkRequestCompleted(requestId)" in html
+    assert "function removeRequestCardsById(type, requestId)" in html
+    assert "function clearTransientStatusMessages()" in html
+    assert "function addTransientStatusMsg(text)" in html
+    assert "if (completedRequestIds.has(requestId)) return;" in html
+    assert "const approvedLabel = approved ? '已批准' : '已拒绝';" in html
+    assert "addTransientStatusMsg(approvedLabel);" in html
+    assert "wrap.remove();" in html
+    assert "loadCompletedRequestIds();" in html
+    assert "removeRequestCardsById('approval', requestId);" in html
+    assert "removeRequestCardsById('choice', requestId);" in html

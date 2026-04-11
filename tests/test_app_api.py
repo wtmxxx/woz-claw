@@ -1,6 +1,8 @@
+from io import BytesIO
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 from pathlib import Path
+from zipfile import ZipFile
 
 import yaml
 
@@ -58,6 +60,8 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
                 {"type": "tool", "name": "search_session", "source": "",
                     "dir": "", "input": "秘密", "output": "#3 ..."},
             ],
+            approval_request=None,
+            choice_request=None,
         )
 
     monkeypatch.setattr(app_module.chat_service, "chat", fake_chat)
@@ -73,6 +77,134 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
     assert payload["loaded_skills"][0]["name"] == "memory-tools"
     assert payload["activity_traces"][0]["type"] == "skill"
     assert payload["activity_traces"][1]["type"] == "tool"
+    assert payload["approval_request"] is None
+    assert payload["choice_request"] is None
+
+
+def test_chat_api_returns_approval_request(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_chat(user_id: str, session_id: str, message: str):
+        _ = user_id
+        _ = session_id
+        _ = message
+        return SimpleNamespace(
+            reply="等待审批",
+            memory_hits=0,
+            title="标题",
+            tool_calls=[{"name": "bash_command", "input": "rm root/a.txt",
+                         "output": "__APPROVAL_REQUIRED__{}"}],
+            loaded_skills=[],
+            activity_traces=[],
+            approval_request={
+                "request_id": "abc123",
+                "command": "rm root/a.txt",
+                "operation": "delete",
+                "reason": "operation delete policy",
+            },
+            choice_request=None,
+        )
+
+    monkeypatch.setattr(app_module.chat_service, "chat", fake_chat)
+
+    response = client.post(
+        "/api/chat",
+        json={"user_id": "u1", "session_id": "s1", "message": "删一下"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approval_request"]["request_id"] == "abc123"
+
+
+def test_chat_api_returns_choice_request(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_chat(user_id: str, session_id: str, message: str):
+        _ = user_id
+        _ = session_id
+        _ = message
+        return SimpleNamespace(
+            reply="我有点拿不准",
+            memory_hits=0,
+            title="标题",
+            tool_calls=[{"name": "ask_human_choice",
+                         "input": "q", "output": "__CHOICE_REQUIRED__{}"}],
+            loaded_skills=[],
+            activity_traces=[],
+            approval_request=None,
+            choice_request={
+                "request_id": "c123",
+                "question": "你更喜欢哪种输出",
+                "options": ["简洁", "详细"],
+                "allow_custom": True,
+            },
+        )
+
+    monkeypatch.setattr(app_module.chat_service, "chat", fake_chat)
+
+    response = client.post(
+        "/api/chat",
+        json={"user_id": "u1", "session_id": "s1", "message": "帮我选"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["choice_request"]["request_id"] == "c123"
+
+
+def test_submit_choice_accepts_custom_input(monkeypatch, tmp_path: Path) -> None:
+    app_module.memory_store = MemoryStore(root_dir=tmp_path)
+    app_module.memory_store.create_pending_choice(
+        "u1",
+        "s1",
+        {
+            "question": "你更喜欢哪种输出",
+            "options": ["简洁", "详细"],
+            "allow_custom": True,
+        },
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_chat(user_id: str, session_id: str, message: str):
+        captured["user_id"] = user_id
+        captured["session_id"] = session_id
+        captured["message"] = message
+        return SimpleNamespace(
+            reply="收到你的选择",
+            memory_hits=0,
+            title="标题",
+            tool_calls=[],
+            loaded_skills=[],
+            activity_traces=[],
+            approval_request=None,
+            choice_request=None,
+        )
+
+    monkeypatch.setattr(app_module.chat_service, "chat", fake_chat)
+    client = TestClient(app_module.app)
+
+    # fetch generated request_id from store file
+    choice_file = tmp_path / "u1" / "choices" / "s1.json"
+    parsed = yaml.safe_load(choice_file.read_text(encoding="utf-8"))
+    request_id = next(iter(parsed.keys()))
+
+    response = client.post(
+        "/api/choices/submit",
+        json={
+            "user_id": "u1",
+            "session_id": "s1",
+            "request_id": request_id,
+            "selected_option": "",
+            "custom_input": "我想要图文并茂",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["user_id"] == "u1"
+    assert captured["session_id"] == "s1"
+    assert "我想要图文并茂" in captured["message"]
 
 
 def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
@@ -172,6 +304,10 @@ def test_get_settings_returns_long_term_memory_and_skill_toggles(
     assert payload["long_term_memory"] == "用户偏好中文"
     assert payload["skills"][0] == {"name": "memory-tools", "enabled": False}
     assert payload["skills"][1] == {"name": "weather", "enabled": True}
+    assert payload["command_policy"]["operations"]["read"] == "allow"
+    assert payload["command_policy"]["operations"]["write"] == "ask_human"
+    assert payload["command_policy"]["operations"]["delete"] == "ask_human"
+    assert payload["command_policy"]["allowed_paths"] == []
 
 
 def test_put_settings_updates_long_term_memory_and_skill_toggles(
@@ -193,6 +329,19 @@ def test_put_settings_updates_long_term_memory_and_skill_toggles(
                 {"name": "memory-tools", "enabled": True},
                 {"name": "reply-style", "enabled": False},
             ],
+            "command_policy": {
+                "enabled": True,
+                "default_action": "ask_human",
+                "operations": {
+                    "read": "allow",
+                    "write": "ask_human",
+                    "delete": "ask_human",
+                    "exec": "ask_human",
+                },
+                "command_allowlist": ["cat", "ls", "rg"],
+                "command_blocklist": ["curl"],
+                "allowed_paths": ["root/workdir", ".sandbox/skills"],
+            },
         },
     )
 
@@ -210,3 +359,160 @@ def test_put_settings_updates_long_term_memory_and_skill_toggles(
             {"name": "reply-style", "enabled": False},
         ]
     }
+
+    command_policy_file = tmp_path / "config" / "u2" / "command_policy.json"
+    command_policy = yaml.safe_load(
+        command_policy_file.read_text(encoding="utf-8"))
+    assert command_policy["operations"]["read"] == "allow"
+    assert command_policy["operations"]["write"] == "ask_human"
+    assert command_policy["command_allowlist"] == [
+        "cat", "ls", "rg"]
+    assert command_policy["allowed_paths"] == [
+        "root/workdir", ".sandbox/skills"]
+
+
+def test_upload_skill_zip_extracts_and_enables_skill(monkeypatch, tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    monkeypatch.setattr(app_module, "_skills_root_dir", lambda: skills_root)
+    client = TestClient(app_module.app)
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "multi-search-engine/SKILL.md",
+            "---\nname: multi-search-engine\ndescription: test\n---\n# demo\n",
+        )
+        archive.writestr("multi-search-engine/README.md", "demo")
+
+    response = client.post(
+        "/api/skills/upload",
+        data={"user_id": "u1"},
+        files={"file": ("multi-search-engine-2.0.1.zip",
+                        buffer.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["name"] == "multi-search-engine"
+    assert (skills_root / "u1" / "multi-search-engine" / "SKILL.md").exists()
+
+    parsed = yaml.safe_load(
+        (skills_root / "u1" / "skills.yaml").read_text(encoding="utf-8"))
+    assert parsed == {"skills": [
+        {"name": "multi-search-engine", "enabled": True}]}
+
+
+def test_upload_skill_zip_falls_back_to_zip_name_without_version(monkeypatch, tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    monkeypatch.setattr(app_module, "_skills_root_dir", lambda: skills_root)
+    client = TestClient(app_module.app)
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "multi-search-engine-2.0.1/SKILL.md",
+            "---\ndescription: test\n---\n# demo\n",
+        )
+
+    response = client.post(
+        "/api/skills/upload",
+        data={"user_id": "u1"},
+        files={"file": ("multi-search-engine-2.0.1.zip",
+                        buffer.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "multi-search-engine"
+    assert (skills_root / "u1" / "multi-search-engine" / "SKILL.md").exists()
+
+
+def test_upload_skill_zip_overwrites_existing_skill(monkeypatch, tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    target_dir = skills_root / "u1" / "multi-search-engine"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "SKILL.md").write_text("---\nname: old\n---\nold", encoding="utf-8")
+    monkeypatch.setattr(app_module, "_skills_root_dir", lambda: skills_root)
+    client = TestClient(app_module.app)
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "multi-search-engine/SKILL.md",
+            "---\nname: multi-search-engine\ndescription: test\n---\n# demo\n",
+        )
+
+    response = client.post(
+        "/api/skills/upload",
+        data={"user_id": "u1"},
+        files={"file": ("multi-search-engine.zip",
+                        buffer.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    assert (target_dir / "SKILL.md").read_text(
+        encoding="utf-8").startswith("---\nname: multi-search-engine")
+
+
+def test_get_pending_state_returns_approvals_and_choices(
+    tmp_path: Path,
+) -> None:
+    """Test that /api/sessions/{session_id}/pending-state returns pending requests."""
+    memory_store = MemoryStore(root_dir=tmp_path)
+
+    # Create a pending approval
+    approval = memory_store.create_pending_approval(
+        user_id="u1",
+        session_id="s1",
+        payload={
+            "command": "ls -la",
+            "operation": "exec",
+            "reason": "test approval",
+        },
+    )
+
+    # Create a pending choice
+    choice = memory_store.create_pending_choice(
+        user_id="u1",
+        session_id="s1",
+        payload={
+            "question": "Which option?",
+            "options": ["option1", "option2"],
+            "allow_custom": True,
+        },
+    )
+
+    # Mock the app's memory_store
+    import types
+    app_module.memory_store = memory_store
+    client = TestClient(app_module.app)
+
+    response = client.get(
+        "/api/sessions/s1/pending-state",
+        params={"user_id": "u1"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify pending approvals
+    assert "pending_approvals" in data
+    assert len(data["pending_approvals"]) == 1
+    assert data["pending_approvals"][0]["command"] == "ls -la"
+    assert data["pending_approvals"][0]["request_id"] == approval["request_id"]
+
+    # Verify pending choices
+    assert "pending_choices" in data
+    assert len(data["pending_choices"]) == 1
+    assert data["pending_choices"][0]["question"] == "Which option?"
+    assert data["pending_choices"][0]["request_id"] == choice["request_id"]
+
+
+def test_get_pending_state_requires_user_id_and_session_id() -> None:
+    """Test that /api/sessions/{session_id}/pending-state requires user_id and session_id."""
+    client = TestClient(app_module.app)
+
+    # Missing user_id - FastAPI returns 422 for missing query params
+    response = client.get("/api/sessions/s1/pending-state")
+    assert response.status_code == 422

@@ -1,0 +1,10 @@
+{
+  "109e2b0ad484": {
+    "request_id": "109e2b0ad484",
+    "created_at": "2026-04-11T19:24:48",
+    "type": "bash_command",
+    "command": "sed -n '1,200p' root/rag-demo/app/chunker.py",
+    "operation": "read",
+    "reason": "operation read policy"
+  }
+}

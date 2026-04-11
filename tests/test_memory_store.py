@@ -272,3 +272,142 @@ def test_load_context_session_uses_token_budget_not_round_limit(tmp_path: Path) 
 
     # New behavior: session selection should follow token budget, not session_limit rounds.
     assert len(result.session_messages) > 1
+
+
+def test_pending_react_state_is_stored_in_session_memory_file(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.set_pending_react_state(
+        "u13",
+        "s13",
+        "req13",
+        {"user_message": "继续", "prompt_context": "ctx"},
+    )
+
+    session_state_file = tmp_path / "u13" / "session_memory" / "s13.json"
+    react_state_file = tmp_path / "u13" / "react_state" / "s13.json"
+    assert session_state_file.exists()
+    assert not react_state_file.exists()
+
+    popped = store.pop_pending_react_state("u13", "s13", "req13")
+    assert popped is not None
+    assert popped["user_message"] == "继续"
+
+
+def test_load_context_includes_session_memory(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.update_session_state("u14", "s14", {"session_memory": "这是会话压缩摘要"})
+
+    context = store.load_context(
+        "u14",
+        "s14",
+        query="测试",
+        session_limit=0,
+        daily_limit=0,
+    )
+    prompt = store.build_prompt_context(context)
+
+    assert "[SESSION_MEMORY]" in prompt
+    assert "这是会话压缩摘要" in prompt
+
+
+def test_session_memory_accumulates_dialogue_and_tool_operations(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_message("u15", "s15", "user", "你好")
+    store.append_session_message(
+        "u15",
+        "s15",
+        "assistant",
+        "我先检查文件",
+        meta={
+            "tool_calls": [
+                {
+                    "name": "bash_command",
+                    "input": "ls root/",
+                    "output": "README.md",
+                }
+            ]
+        },
+    )
+
+    state = store.get_session_state("u15", "s15")
+    text = str(state.get("session_memory", ""))
+    assert "user: 你好" in text
+    assert "assistant: 我先检查文件" in text
+    assert "[tool] bash_command" in text
+    assert "输入: ls root/" in text
+    assert "输出: README.md" in text
+
+
+def test_session_memory_ignores_approval_placeholder_tool_output(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.append_session_message(
+        "u16",
+        "s16",
+        "assistant",
+        "等待审批",
+        meta={
+            "tool_calls": [
+                {
+                    "name": "bash_command",
+                    "input": "rm root/a.txt",
+                    "output": "__APPROVAL_REQUIRED__{\"request_id\":\"ap16\",\"command\":\"rm root/a.txt\"}",
+                }
+            ]
+        },
+    )
+
+    state = store.get_session_state("u16", "s16")
+    text = str(state.get("session_memory", ""))
+    assert "等待审批" in text
+    assert "__APPROVAL_REQUIRED__" not in text
+    assert "[tool] bash_command" not in text
+
+
+def test_pending_choice_uses_request_id_as_storage_key(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    item = store.create_pending_choice(
+        "u17",
+        "s17",
+        {
+            "request_id": "c17",
+            "question": "选哪个",
+            "options": ["A", "B"],
+        },
+    )
+    assert item["request_id"] == "c17"
+
+    popped = store.pop_pending_choice("u17", "s17", "c17")
+    assert popped is not None
+    assert popped["request_id"] == "c17"
+
+
+def test_pending_choice_duplicate_request_id_overwrites_in_place(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.create_pending_choice(
+        "u18",
+        "s18",
+        {
+            "request_id": "c18",
+            "question": "第一次问题",
+            "options": ["A"],
+        },
+    )
+    store.create_pending_choice(
+        "u18",
+        "s18",
+        {
+            "request_id": "c18",
+            "question": "第二次问题",
+            "options": ["B"],
+        },
+    )
+
+    pending = store.get_pending_choices("u18", "s18")
+    assert len(pending) == 1
+    assert pending[0]["request_id"] == "c18"
+    assert pending[0]["question"] == "第二次问题"

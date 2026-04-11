@@ -1,4 +1,6 @@
-from wozclaw.agent import ReActMemoryAgent
+import asyncio
+
+from wozclaw.agent import ReActMemoryAgent, ApprovalInterrupt
 from wozclaw.memory_store import MemoryStore
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ def test_memory_prompt_requires_full_memory_rewrite(tmp_path) -> None:
     assert "优先调用工具" in prompt
     assert "能调用工具就调用工具" in prompt
     assert "只有在工具确实无法解决问题时" in prompt
+    assert "compact_context" in prompt
     assert "当前用户ID" in prompt
     assert "u1" in prompt
     assert "bash_command" in prompt
@@ -34,7 +37,14 @@ def test_memory_prompt_requires_full_memory_rewrite(tmp_path) -> None:
     assert "root/ 表示工作目录" in prompt
     assert ".sandbox/ 表示项目根目录" in prompt
     assert "输出最多保留100000字符" in prompt
-    assert "尽量不要一次读取大段内容" in prompt
+    assert "搜索优先" in prompt
+    assert "最小读取" in prompt
+    assert "再修改" in prompt
+    assert "精确替换部分内容" in prompt
+    assert "sed" in prompt
+    assert "awk" in prompt
+    assert "perl" in prompt
+    assert "非必要不要替换整个文件" in prompt
 
 
 def test_agent_module_no_langchain_or_langgraph_imports() -> None:
@@ -62,6 +72,41 @@ def test_respond_handles_read_only_sys_prompt(monkeypatch, tmp_path) -> None:
     result = agent.respond("你好", "上下文")
 
     assert result.text == "ok"
+
+
+def test_respond_returns_immediately_on_approval_interrupt(tmp_path) -> None:
+    class DummyApprovalAgent:
+        async def reply(self, msg):  # noqa: ANN001
+            _ = msg
+            raise ApprovalInterrupt("需要人工审批后继续")
+
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-approval", session_id="s-approval")
+    agent._agent = DummyApprovalAgent()  # type: ignore[assignment]
+
+    result = agent.respond("执行危险命令", "上下文")
+
+    assert result.text == "需要人工审批后继续"
+
+
+def test_respond_cancels_running_reply_when_approval_flag_set(tmp_path) -> None:
+    class DummySlowAgent:
+        def __init__(self, owner: ReActMemoryAgent) -> None:
+            self.owner = owner
+
+        async def reply(self, msg):  # noqa: ANN001
+            _ = msg
+            self.owner._approval_interrupt_requested = True
+            await asyncio.sleep(1)
+            return SimpleNamespace(content="should-not-reach")
+
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-cancel", session_id="s-cancel")
+    agent._agent = DummySlowAgent(agent)  # type: ignore[assignment]
+
+    result = agent.respond("执行危险命令", "上下文")
+
+    assert "人工审批" in result.text
 
 
 def test_user_skills_yaml_controls_enabled_skills(monkeypatch, tmp_path) -> None:
@@ -252,6 +297,121 @@ def test_user_setting_can_enable_global_skill_without_user_dir(monkeypatch, tmp_
     assert resolved == [global_dir]
 
 
+def test_bash_policy_default_allows_read_but_requires_approval_for_write_and_delete(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u10", session_id="s10")
+
+    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        _ = args
+        _ = kwargs
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    read_out = agent._run_bash_command("cat root/README.md")
+    assert read_out == "ok"
+
+    write_out = agent._run_bash_command("echo hi > root/a.txt")
+    assert write_out.startswith("__APPROVAL_REQUIRED__")
+
+    delete_out = agent._run_bash_command("rm root/a.txt")
+    assert delete_out.startswith("__APPROVAL_REQUIRED__")
+
+
+def test_bash_policy_can_deny_when_configured(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.set_user_settings(
+        "u11",
+        {
+            "command_policy": {
+                "enabled": True,
+                "operations": {
+                    "read": "allow",
+                    "write": "deny",
+                    "delete": "ask_human",
+                    "exec": "ask_human",
+                },
+            }
+        },
+    )
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u11", session_id="s11")
+
+    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        _ = args
+        _ = kwargs
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    denied = agent._run_bash_command("echo hi > root/a.txt")
+    assert denied.startswith("error: command denied by policy")
+
+
+def test_bash_policy_allowed_paths_bypass_read_write_delete(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.set_command_policy(
+        "u12",
+        {
+            "enabled": True,
+            "operations": {
+                "read": "ask_human",
+                "write": "ask_human",
+                "delete": "ask_human",
+                "exec": "ask_human",
+            },
+            "allowed_paths": ["root/safe-zone"],
+        },
+    )
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u12", session_id="s12")
+
+    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        _ = args
+        _ = kwargs
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    out_read = agent._run_bash_command("cat root/safe-zone/a.txt")
+    out_write = agent._run_bash_command("echo hello > root/safe-zone/a.txt")
+    out_delete = agent._run_bash_command("rm root/safe-zone/a.txt")
+
+    assert out_read == "ok"
+    assert out_write == "ok"
+    assert out_delete == "ok"
+
+
+def test_bash_policy_allowed_paths_do_not_bypass_exec(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    store.set_command_policy(
+        "u13",
+        {
+            "enabled": True,
+            "operations": {
+                "read": "allow",
+                "write": "ask_human",
+                "delete": "ask_human",
+                "exec": "ask_human",
+            },
+            "allowed_paths": ["root/safe-zone"],
+        },
+    )
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u13", session_id="s13")
+
+    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        _ = args
+        _ = kwargs
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    out_exec = agent._run_bash_command("python root/safe-zone/script.py")
+    assert out_exec.startswith("__APPROVAL_REQUIRED__")
+
+
 def test_bash_command_allows_most_commands(tmp_path) -> None:
     """Test that bash_command now allows find, grep, and other common commands."""
     store = MemoryStore(root_dir=tmp_path)
@@ -267,8 +427,8 @@ def test_bash_command_allows_most_commands(tmp_path) -> None:
     assert ok is True
 
 
-def test_bash_command_only_disallows_dotdot(tmp_path) -> None:
-    """Test that only .. traversal is forbidden now."""
+def test_bash_command_allows_dotdot_paths(tmp_path) -> None:
+    """Test that bash command validation no longer blocks .. traversal tokens."""
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(memory_store=store, user_id="u6", session_id="s6")
 
@@ -281,10 +441,10 @@ def test_bash_command_only_disallows_dotdot(tmp_path) -> None:
     ok, reason = agent._validate_bash_command("ls src")
     assert ok is True
 
-    # Only .. should fail
+    # .. paths are now also allowed
     ok, reason = agent._validate_bash_command("ls ../outside")
-    assert ok is False
-    assert "unsafe" in reason
+    assert ok is True
+    assert reason == ""
 
     # Literal text with .. should not be treated as traversal
     ok, reason = agent._validate_bash_command('echo "a..b"')
@@ -297,14 +457,14 @@ def test_bash_command_only_disallows_dotdot(tmp_path) -> None:
     assert reason == ""
 
 
-def test_bash_path_validation_only_blocks_actual_traversal(tmp_path) -> None:
+def test_bash_path_validation_allows_dotdot(tmp_path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(
         memory_store=store, user_id="u6b", session_id="s6b")
 
     ok, reason = agent._validate_bash_path("../outside")
-    assert ok is False
-    assert "unsafe" in reason
+    assert ok is True
+    assert reason == ""
 
     ok, reason = agent._validate_bash_path("a..b")
     assert ok is True

@@ -1,0 +1,31 @@
+{
+  "6a25ceeae4be": {
+    "request_id": "40557591913f",
+    "created_at": "2026-04-11T18:37:09",
+    "question": "您想详细了解哪个部分？",
+    "options": [
+      "rag-demo 目录",
+      "README.md 文件内容",
+      "reports 目录",
+      "snake-game 目录",
+      "test-del 目录",
+      "查看所有目录的详细结构"
+    ],
+    "allow_custom": true
+  },
+  "91c69507d1af": {
+    "request_id": "56ee2d366f76",
+    "created_at": "2026-04-11T18:38:43",
+    "question": "您想详细了解 rag-demo 的哪个部分？",
+    "options": [
+      "查看核心分片逻辑 (chunker.py)",
+      "查看FastAPI后端实现 (main.py)",
+      "查看前端交互实现 (app.js)",
+      "查看示例文档内容 (sample.txt)",
+      "查看项目依赖配置 (requirements.txt)",
+      "查看文档目录内容 (docs/)",
+      "查看示例目录内容 (sample/)"
+    ],
+    "allow_custom": true
+  }
+}

@@ -180,8 +180,8 @@
             color: #1f56d8;
             padding: 12px 14px;
             display: inline-flex;
-            align-items: center;
-            justify-content: center;
+            align-items: flex-start;
+            justify-content: flex-start;
             gap: 8px;
             text-align: center;
             box-shadow: none;
@@ -505,7 +505,7 @@
             display: grid;
             grid-template-columns: 1fr auto;
             gap: 10px;
-            align-items: center;
+            align-items: stretch;
         }
 
         .composer input {
@@ -653,6 +653,86 @@
             gap: 7px;
         }
 
+        .skill-upload-card {
+            padding: 12px;
+            border: 1px solid #d7e1ee;
+            border-radius: 12px;
+            background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        }
+
+        .skill-upload-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: baseline;
+            flex-wrap: wrap;
+        }
+
+        .skill-upload-hint {
+            color: #64748b;
+            font-size: 12px;
+        }
+
+        .skill-upload-actions {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: start;
+        }
+
+        .skill-upload-picker-wrap {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 10px;
+            align-items: start;
+            min-width: 0;
+        }
+
+        .skill-upload-input {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        .skill-upload-picker {
+            display: inline-block;
+            height: 38px;
+            line-height: 38px;
+            padding: 0 14px;
+            border: 1px solid #c7d4e4;
+            border-radius: 9px;
+            background: linear-gradient(180deg, #ffffff 0%, #f6f9fc 100%);
+            color: #334155;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+        }
+
+        .skill-upload-picker:hover {
+            background: #f8fafc;
+            border-color: #9fb5d0;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08);
+        }
+
+        .skill-upload-file-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #64748b;
+            font-size: 12px;
+            height: 38px;
+            line-height: 38px;
+        }
+
         #settingsPanelMemory {
             display: grid;
             grid-template-rows: 1fr;
@@ -663,6 +743,10 @@
         }
 
         #settingsPanelSkills {
+            align-content: start;
+        }
+
+        #settingsPanelPolicy {
             align-content: start;
         }
 
@@ -714,7 +798,7 @@
         .skill-item {
             display: grid;
             grid-template-columns: auto 1fr;
-            align-items: center;
+            align-items: start;
             gap: 9px;
             font-size: 14px;
             color: #334155;
@@ -756,6 +840,10 @@
 
         .secondary-btn:hover {
             background: #f8fafc;
+        }
+
+        .skill-upload-actions .secondary-btn {
+            min-width: 88px;
         }
 
         .primary-btn {
@@ -909,8 +997,10 @@
                         <div class="settings-nav">
                             <button id="settingsTabMemory" class="settings-nav-btn active" type="button"
                                 data-panel="memory">长期记忆</button>
+                            <button id="settingsTabPolicy" class="settings-nav-btn" type="button"
+                                data-panel="policy">命令审批</button>
                             <button id="settingsTabSkills" class="settings-nav-btn" type="button"
-                                data-panel="skills">Skills 开关</button>
+                                data-panel="skills">Skills</button>
                         </div>
 
                         <div class="settings-panel-wrap">
@@ -922,9 +1012,82 @@
                             </div>
 
                             <div id="settingsPanelSkills" class="settings-panel hidden">
+                                <div class="settings-group skill-upload-card">
+                                    <div class="skill-upload-head">
+                                        <label for="skillUploadFile">上传 Skill ZIP</label>
+                                        <span class="skill-upload-hint">自动解压并启用</span>
+                                    </div>
+                                    <div class="skill-upload-actions">
+                                        <div class="skill-upload-picker-wrap">
+                                            <input id="skillUploadFile" class="skill-upload-input" type="file"
+                                                accept=".zip,application/zip" />
+                                            <label for="skillUploadFile" class="skill-upload-picker">选择 ZIP 文件</label>
+                                            <span id="skillUploadFileName" class="skill-upload-file-name">未选择文件</span>
+                                        </div>
+                                        <button id="skillUploadBtn" class="secondary-btn" type="button">上传</button>
+                                    </div>
+                                </div>
+
                                 <div class="settings-group">
                                     <label for="skillsList">Skills 开关</label>
                                     <div id="skillsList" class="skills-list"></div>
+                                </div>
+                            </div>
+
+                            <div id="settingsPanelPolicy" class="settings-panel hidden">
+                                <div class="settings-group">
+                                    <label for="commandAllowlist">命令审批策略</label>
+                                    <div class="grid gap-2">
+                                        <div class="grid grid-cols-2 gap-2">
+                                            <label>读操作
+                                                <select id="policyReadAction"
+                                                    class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm">
+                                                    <option value="allow">allow</option>
+                                                    <option value="ask_human">ask_human</option>
+                                                    <option value="deny">deny</option>
+                                                </select>
+                                            </label>
+                                            <label>写操作
+                                                <select id="policyWriteAction"
+                                                    class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm">
+                                                    <option value="allow">allow</option>
+                                                    <option value="ask_human" selected>ask_human</option>
+                                                    <option value="deny">deny</option>
+                                                </select>
+                                            </label>
+                                            <label>删操作
+                                                <select id="policyDeleteAction"
+                                                    class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm">
+                                                    <option value="allow">allow</option>
+                                                    <option value="ask_human" selected>ask_human</option>
+                                                    <option value="deny">deny</option>
+                                                </select>
+                                            </label>
+                                            <label>执行操作
+                                                <select id="policyExecAction"
+                                                    class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm">
+                                                    <option value="allow">allow</option>
+                                                    <option value="ask_human" selected>ask_human</option>
+                                                    <option value="deny">deny</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                        <label for="commandAllowlist">命令白名单（逗号分隔）
+                                            <input id="commandAllowlist"
+                                                class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm"
+                                                placeholder="例如: ls,cat,rg,grep,find" />
+                                        </label>
+                                        <label for="commandBlocklist">命令黑名单（逗号分隔）
+                                            <input id="commandBlocklist"
+                                                class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm"
+                                                placeholder="例如: curl,wget,ssh" />
+                                        </label>
+                                        <label for="allowedPaths">允许路径列表（逗号分隔）
+                                            <input id="allowedPaths"
+                                                class="w-full border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm"
+                                                placeholder="例如: root/workdir,.sandbox/skills/demo-user" />
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -957,17 +1120,91 @@
         const chatViewEl = document.getElementById('chatView');
         const settingsViewEl = document.getElementById('settingsView');
         const longTermMemoryEl = document.getElementById('longTermMemory');
+        const skillUploadFileEl = document.getElementById('skillUploadFile');
+        const skillUploadFileNameEl = document.getElementById('skillUploadFileName');
+        const skillUploadBtnEl = document.getElementById('skillUploadBtn');
         const skillsListEl = document.getElementById('skillsList');
         const saveSettingsBtn = document.getElementById('saveSettingsBtn');
         const backToChatBtn = document.getElementById('backToChatBtn');
         const settingsStatusEl = document.getElementById('settingsStatus');
         const settingsTabMemoryEl = document.getElementById('settingsTabMemory');
+        const settingsTabPolicyEl = document.getElementById('settingsTabPolicy');
         const settingsTabSkillsEl = document.getElementById('settingsTabSkills');
         const settingsPanelMemoryEl = document.getElementById('settingsPanelMemory');
+        const settingsPanelPolicyEl = document.getElementById('settingsPanelPolicy');
         const settingsPanelSkillsEl = document.getElementById('settingsPanelSkills');
+        const policyReadActionEl = document.getElementById('policyReadAction');
+        const policyWriteActionEl = document.getElementById('policyWriteAction');
+        const policyDeleteActionEl = document.getElementById('policyDeleteAction');
+        const policyExecActionEl = document.getElementById('policyExecAction');
+        const commandAllowlistEl = document.getElementById('commandAllowlist');
+        const commandBlocklistEl = document.getElementById('commandBlocklist');
+        const allowedPathsEl = document.getElementById('allowedPaths');
 
         let currentSessionId = null;
         let conversations = [];
+        let completedRequestIds = new Set();
+
+        function completedRequestStorageKey() {
+            const userId = userIdEl.value.trim() || 'demo-user';
+            const sessionId = currentSessionId || 'no-session';
+            return `wozclaw.completedRequests.${userId}.${sessionId}`;
+        }
+
+        function loadCompletedRequestIds() {
+            completedRequestIds = new Set();
+            try {
+                const raw = sessionStorage.getItem(completedRequestStorageKey()) || '[]';
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                    completedRequestIds = new Set(parsed.map((id) => String(id || '').trim()).filter(Boolean));
+                }
+            } catch (err) {
+                console.warn('Failed to load completed request ids:', err);
+            }
+        }
+
+        function markRequestCompleted(requestId) {
+            const id = String(requestId || '').trim();
+            if (!id) return;
+            completedRequestIds.add(id);
+            try {
+                sessionStorage.setItem(completedRequestStorageKey(), JSON.stringify(Array.from(completedRequestIds)));
+            } catch (err) {
+                console.warn('Failed to persist completed request ids:', err);
+            }
+        }
+
+        function unmarkRequestCompleted(requestId) {
+            const id = String(requestId || '').trim();
+            if (!id) return;
+            completedRequestIds.delete(id);
+            try {
+                sessionStorage.setItem(completedRequestStorageKey(), JSON.stringify(Array.from(completedRequestIds)));
+            } catch (err) {
+                console.warn('Failed to rollback completed request ids:', err);
+            }
+        }
+
+        function removeRequestCardsById(type, requestId) {
+            const id = String(requestId || '').trim();
+            if (!id) return;
+            const selector = `[data-request-card="${type}:${id}"]`;
+            messagesEl.querySelectorAll(selector).forEach((node) => node.remove());
+        }
+
+        function clearTransientStatusMessages() {
+            messagesEl.querySelectorAll('[data-transient-status="1"]').forEach((node) => node.remove());
+        }
+
+        function addTransientStatusMsg(text) {
+            const div = document.createElement('div');
+            div.className = 'msg a rounded-chat';
+            div.dataset.transientStatus = '1';
+            div.textContent = String(text || '').trim();
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
 
         function getUserInitials(userName) {
             const text = String(userName || '').trim();
@@ -1027,6 +1264,40 @@
                 .filter((item) => item.name);
         }
 
+        function parseCommaList(text) {
+            return String(text || '')
+                .split(',')
+                .map((item) => item.trim())
+                .filter(Boolean);
+        }
+
+        function fillCommandPolicy(policy = {}) {
+            const operations = policy.operations || {};
+            policyReadActionEl.value = String(operations.read || 'allow');
+            policyWriteActionEl.value = String(operations.write || 'ask_human');
+            policyDeleteActionEl.value = String(operations.delete || 'ask_human');
+            policyExecActionEl.value = String(operations.exec || 'ask_human');
+            commandAllowlistEl.value = Array.isArray(policy.command_allowlist) ? policy.command_allowlist.join(',') : '';
+            commandBlocklistEl.value = Array.isArray(policy.command_blocklist) ? policy.command_blocklist.join(',') : '';
+            allowedPathsEl.value = Array.isArray(policy.allowed_paths) ? policy.allowed_paths.join(',') : '';
+        }
+
+        function collectCommandPolicyFromUI() {
+            return {
+                enabled: true,
+                default_action: 'ask_human',
+                operations: {
+                    read: String(policyReadActionEl.value || 'allow'),
+                    write: String(policyWriteActionEl.value || 'ask_human'),
+                    delete: String(policyDeleteActionEl.value || 'ask_human'),
+                    exec: String(policyExecActionEl.value || 'ask_human'),
+                },
+                command_allowlist: parseCommaList(commandAllowlistEl.value),
+                command_blocklist: parseCommaList(commandBlocklistEl.value),
+                allowed_paths: parseCommaList(allowedPathsEl.value),
+            };
+        }
+
         async function loadSettings() {
             const user_id = userIdEl.value.trim();
             const res = await fetch(`/api/settings?user_id=${encodeURIComponent(user_id)}`);
@@ -1035,6 +1306,31 @@
 
             longTermMemoryEl.value = String(data.long_term_memory || '');
             renderSkillsList(data.skills || []);
+            fillCommandPolicy(data.command_policy || {});
+        }
+
+        async function uploadSkillZip() {
+            const file = skillUploadFileEl.files && skillUploadFileEl.files[0];
+            if (!file) {
+                throw new Error('请选择 zip 文件');
+            }
+
+            const user_id = userIdEl.value.trim();
+            const formData = new FormData();
+            formData.append('user_id', user_id);
+            formData.append('file', file);
+
+            const res = await fetch('/api/skills/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '上传失败');
+
+            skillUploadFileEl.value = '';
+            skillUploadFileNameEl.textContent = '未选择文件';
+            await loadSettings();
+            settingsStatusEl.textContent = `上传成功: ${data.name || 'skill'}`;
         }
 
         async function saveSettings() {
@@ -1043,6 +1339,7 @@
                 user_id,
                 long_term_memory: String(longTermMemoryEl.value || ''),
                 skills: collectSkillsFromUI(),
+                command_policy: collectCommandPolicyFromUI(),
             };
 
             const res = await fetch('/api/settings', {
@@ -1085,28 +1382,19 @@
         function switchSettingsPanel(panelName) {
             const active = String(panelName || 'memory');
             const showMemory = active === 'memory';
+            const showPolicy = active === 'policy';
+            const showSkills = active === 'skills';
 
             settingsPanelMemoryEl.classList.toggle('hidden', !showMemory);
-            settingsPanelSkillsEl.classList.toggle('hidden', showMemory);
+            settingsPanelPolicyEl.classList.toggle('hidden', !showPolicy);
+            settingsPanelSkillsEl.classList.toggle('hidden', !showSkills);
             settingsTabMemoryEl.classList.toggle('active', showMemory);
-            settingsTabSkillsEl.classList.toggle('active', !showMemory);
+            settingsTabPolicyEl.classList.toggle('active', showPolicy);
+            settingsTabSkillsEl.classList.toggle('active', showSkills);
         }
 
         function buildLegacyActivityTraces(toolCalls = [], loadedSkills = []) {
             const traces = [];
-
-            if (Array.isArray(loadedSkills)) {
-                loadedSkills.forEach((skill) => {
-                    traces.push({
-                        type: 'skill',
-                        name: String(skill?.name || 'skill'),
-                        source: String(skill?.source || ''),
-                        dir: String(skill?.dir || ''),
-                        input: '',
-                        output: 'loaded',
-                    });
-                });
-            }
 
             if (Array.isArray(toolCalls)) {
                 toolCalls.forEach((call) => {
@@ -1124,10 +1412,15 @@
             return traces;
         }
 
-        function formatActivityTraces(activityTraces = [], toolCalls = [], loadedSkills = []) {
+        function visibleActivityTraces(activityTraces = [], toolCalls = [], loadedSkills = []) {
             const traces = Array.isArray(activityTraces) && activityTraces.length > 0
                 ? activityTraces
                 : buildLegacyActivityTraces(toolCalls, loadedSkills);
+            return traces.filter((item) => String(item?.type || 'tool') !== 'skill');
+        }
+
+        function formatActivityTraces(activityTraces = [], toolCalls = [], loadedSkills = []) {
+            const traces = visibleActivityTraces(activityTraces, toolCalls, loadedSkills);
 
             if (traces.length === 0) {
                 return '';
@@ -1167,44 +1460,348 @@
             return lines.join('\n');
         }
 
-        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = []) {
-            const block = document.createElement('div');
-            block.className = 'assistant-block space-y-2';
+        function getLatestAssistantBlock() {
+            const last = messagesEl.lastElementChild;
+            if (!last) {
+                return null;
+            }
+            return last.classList.contains('assistant-block') ? last : null;
+        }
 
-            const activityTraceText = formatActivityTraces(activityTraces, toolCalls, loadedSkills);
-            if (activityTraceText) {
-                const details = document.createElement('details');
+        function appendActivityTracesToBlock(block, activityTraces = [], toolCalls = [], loadedSkills = []) {
+            const incoming = visibleActivityTraces(activityTraces, toolCalls, loadedSkills);
+            if (incoming.length === 0) {
+                return;
+            }
+
+            let details = block.querySelector('details.tool-trace');
+            let summary = null;
+            let pre = null;
+
+            if (!details) {
+                details = document.createElement('details');
                 details.className = 'tool-trace rounded-xl border border-slate-200 bg-slate-50/80';
                 details.open = false;
 
-                const summary = document.createElement('summary');
-                const activityItems = (Array.isArray(activityTraces) && activityTraces.length > 0)
-                    ? activityTraces
-                    : buildLegacyActivityTraces(toolCalls, loadedSkills);
-                summary.textContent = `调用轨迹 (${activityItems.length})`;
-
-                const pre = document.createElement('pre');
-                pre.textContent = activityTraceText;
+                summary = document.createElement('summary');
+                pre = document.createElement('pre');
 
                 details.appendChild(summary);
                 details.appendChild(pre);
                 block.appendChild(details);
+            } else {
+                summary = details.querySelector('summary');
+                pre = details.querySelector('pre');
             }
 
-            const msg = document.createElement('div');
-            msg.className = 'msg a md rounded-chat';
-            const markdownHtml = marked.parse(String(text || ''), {
-                breaks: true,
-                gfm: true,
-            });
-            msg.innerHTML = DOMPurify.sanitize(markdownHtml);
-            block.appendChild(msg);
+            if (!summary || !pre) {
+                return;
+            }
 
-            messagesEl.appendChild(block);
+            let existing = [];
+            const raw = String(details.dataset.traces || '').trim();
+            if (raw) {
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) {
+                        existing = parsed;
+                    }
+                } catch (err) {
+                    console.warn('Failed to parse existing trace cache:', err);
+                }
+            }
+
+            const merged = [...existing, ...incoming];
+            details.dataset.traces = JSON.stringify(merged);
+            summary.textContent = `调用轨迹 (${merged.length})`;
+            pre.textContent = formatActivityTraces(merged, [], []);
+        }
+
+        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = []) {
+            clearTransientStatusMessages();
+            const normalizedText = String(text || '').trim();
+            const hiddenAssistantMessagePrefixes = [
+                '检测到需要人工审批，已暂停执行并等待审批结果',
+                '检测到需要做出选择，已暂停执行并等待用户选择',
+            ];
+            const shouldHideText = hiddenAssistantMessagePrefixes.some((prefix) => normalizedText.startsWith(prefix));
+
+            let block = getLatestAssistantBlock();
+            if (!block) {
+                block = document.createElement('div');
+                block.className = 'assistant-block space-y-2';
+                messagesEl.appendChild(block);
+            }
+
+            appendActivityTracesToBlock(block, activityTraces, toolCalls, loadedSkills);
+
+            if (!shouldHideText && normalizedText) {
+                const msg = document.createElement('div');
+                msg.className = 'msg a md rounded-chat';
+                const markdownHtml = marked.parse(normalizedText, {
+                    breaks: true,
+                    gfm: true,
+                });
+                msg.innerHTML = DOMPurify.sanitize(markdownHtml);
+                block.appendChild(msg);
+            }
+
+            if (block.children.length === 0) {
+                block.remove();
+                return;
+            }
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function addApprovalRequestCard(request) {
+            const item = request || {};
+            const requestId = String(item.request_id || '');
+            const command = String(item.command || '');
+            const operation = String(item.operation || 'unknown');
+            const reason = String(item.reason || 'requires human approval');
+            if (!requestId || !command) return;
+            if (completedRequestIds.has(requestId)) return;
+            if (messagesEl.querySelector(`[data-request-card="approval:${requestId}"]`)) return;
+
+            const wrap = document.createElement('div');
+            wrap.className = 'msg a rounded-chat';
+            wrap.dataset.requestCard = `approval:${requestId}`;
+
+            const title = document.createElement('div');
+            title.className = 'font-semibold';
+            title.textContent = '需要人工审批';
+
+            const desc = document.createElement('pre');
+            desc.className = 'mt-2 whitespace-pre-wrap text-sm';
+            desc.textContent = `操作类型: ${operation}\n原因: ${reason}\n命令: ${command}`;
+
+            const actions = document.createElement('div');
+            actions.className = 'mt-2 flex gap-2';
+
+            const approveBtn = document.createElement('button');
+            approveBtn.type = 'button';
+            approveBtn.className = 'primary-btn';
+            approveBtn.textContent = '批准执行';
+
+            const rejectBtn = document.createElement('button');
+            rejectBtn.type = 'button';
+            rejectBtn.className = 'secondary-btn';
+            rejectBtn.textContent = '拒绝执行';
+
+            const setBusy = (busy) => {
+                approveBtn.disabled = busy;
+                rejectBtn.disabled = busy;
+            };
+
+            async function submitApproval(approved) {
+                setBusy(true);
+                const approvedLabel = approved ? '已批准' : '已拒绝';
+                markRequestCompleted(requestId);
+                wrap.remove();
+                removeRequestCardsById('approval', requestId);
+                addTransientStatusMsg(approvedLabel);
+                try {
+                    const user_id = userIdEl.value.trim();
+                    const session_id = currentSessionId;
+                    const res = await fetch('/api/approvals/decide', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id, session_id, request_id: requestId, approved }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        unmarkRequestCompleted(requestId);
+                        addApprovalRequestCard(item);
+                        addMsg('a', `审批处理失败: ${data.detail || 'unknown error'}`);
+                        setBusy(false);
+                        return;
+                    }
+
+                    addAssistantMsg(data.reply || '', data.tool_calls || [], [], []);
+
+                    // Show next approval if present
+                    if (data.approval_request) {
+                        addApprovalRequestCard(data.approval_request);
+                    }
+
+                    // Show next choice if present
+                    if (data.choice_request) {
+                        addChoiceRequestCard(data.choice_request);
+                    }
+
+                    await loadConversations();
+                    renderConversationList();
+                } catch (err) {
+                    unmarkRequestCompleted(requestId);
+                    addApprovalRequestCard(item);
+                    addMsg('a', `审批请求失败: ${err}`);
+                    setBusy(false);
+                }
+            }
+
+            approveBtn.addEventListener('click', async () => {
+                await submitApproval(true);
+            });
+            rejectBtn.addEventListener('click', async () => {
+                await submitApproval(false);
+            });
+
+            actions.appendChild(approveBtn);
+            actions.appendChild(rejectBtn);
+            wrap.appendChild(title);
+            wrap.appendChild(desc);
+            wrap.appendChild(actions);
+
+            messagesEl.appendChild(wrap);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function addChoiceRequestCard(request) {
+            const item = request || {};
+            const requestId = String(item.request_id || '');
+            const question = String(item.question || '请在以下选项中选择');
+            const options = Array.isArray(item.options) ? item.options.map((v) => String(v || '').trim()).filter(Boolean) : [];
+            const allowCustom = item.allow_custom !== false;
+            if (!requestId) return;
+            if (completedRequestIds.has(requestId)) return;
+            if (messagesEl.querySelector(`[data-request-card="choice:${requestId}"]`)) return;
+
+            const wrap = document.createElement('div');
+            wrap.className = 'msg a rounded-chat';
+            wrap.dataset.requestCard = `choice:${requestId}`;
+
+            const title = document.createElement('div');
+            title.className = 'font-semibold';
+            title.textContent = '需要你做个选择';
+
+            const desc = document.createElement('div');
+            desc.className = 'mt-2 text-sm';
+            desc.textContent = question;
+
+            const optionsWrap = document.createElement('div');
+            optionsWrap.className = 'mt-2 flex flex-wrap gap-2';
+
+            const customWrap = document.createElement('div');
+            customWrap.className = 'mt-2 flex gap-2';
+            const customInput = document.createElement('input');
+            customInput.type = 'text';
+            customInput.placeholder = '或输入你的自定义选项';
+            customInput.className = 'flex-1 min-w-0 border border-slate-200 rounded-xl bg-white px-3 py-2 text-sm';
+            const customSubmit = document.createElement('button');
+            customSubmit.type = 'button';
+            customSubmit.className = 'secondary-btn shrink-0 whitespace-nowrap min-w-24';
+            customSubmit.textContent = '提交自定义';
+
+            let activeButtons = [];
+            const setBusy = (busy) => {
+                activeButtons.forEach((btn) => {
+                    btn.disabled = busy;
+                });
+                customInput.disabled = busy;
+                customSubmit.disabled = busy;
+            };
+
+            async function submitChoice(selectedOption = '', customInputText = '') {
+                setBusy(true);
+                const finalChoice = customInputText || selectedOption;
+                const choiceMessage = question
+                    ? `针对问题【${question}】我的选择是：${finalChoice}`
+                    : `我的选择是：${finalChoice}`;
+                markRequestCompleted(requestId);
+                wrap.remove();
+                removeRequestCardsById('choice', requestId);
+                const pendingChoiceMsgEl = addMsg('u', choiceMessage, false);
+                pendingChoiceMsgEl.dataset.pendingChoice = '1';
+                try {
+                    const user_id = userIdEl.value.trim();
+                    const session_id = currentSessionId;
+                    const res = await fetch('/api/choices/submit', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            user_id,
+                            session_id,
+                            request_id: requestId,
+                            selected_option: selectedOption,
+                            custom_input: customInputText,
+                        }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        unmarkRequestCompleted(requestId);
+                        pendingChoiceMsgEl.remove();
+                        addChoiceRequestCard(item);
+                        addMsg('a', `提交选择失败: ${data.detail || 'unknown error'}`);
+                        setBusy(false);
+                        return;
+                    }
+
+                    addAssistantMsg(
+                        `${data.reply}`,
+                        data.tool_calls || [],
+                        data.loaded_skills || [],
+                        data.activity_traces || [],
+                    );
+                    if (data.approval_request) {
+                        addApprovalRequestCard(data.approval_request);
+                    }
+                    if (data.choice_request) {
+                        addChoiceRequestCard(data.choice_request);
+                    }
+                    if (data.title) {
+                        currentTitleEl.textContent = data.title;
+                    }
+                    await loadConversations();
+                    renderConversationList();
+                } catch (err) {
+                    unmarkRequestCompleted(requestId);
+                    pendingChoiceMsgEl.remove();
+                    addChoiceRequestCard(item);
+                    addMsg('a', `提交选择失败: ${err}`);
+                    setBusy(false);
+                }
+            }
+
+            options.forEach((optionText) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'secondary-btn';
+                btn.textContent = optionText;
+                btn.addEventListener('click', async () => {
+                    await submitChoice(optionText, '');
+                });
+                activeButtons.push(btn);
+                optionsWrap.appendChild(btn);
+            });
+
+            customSubmit.addEventListener('click', async () => {
+                const customText = String(customInput.value || '').trim();
+                if (!customText) {
+                    addMsg('a', '请输入自定义选项内容');
+                    return;
+                }
+                await submitChoice('', customText);
+            });
+
+            wrap.appendChild(title);
+            wrap.appendChild(desc);
+            if (options.length > 0) {
+                wrap.appendChild(optionsWrap);
+            }
+            if (allowCustom) {
+                customWrap.appendChild(customInput);
+                customWrap.appendChild(customSubmit);
+                wrap.appendChild(customWrap);
+            }
+
+            messagesEl.appendChild(wrap);
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }
 
         function addMsg(cls, text, renderMarkdown = false) {
+            if (cls === 'u') {
+                clearTransientStatusMessages();
+            }
             const div = document.createElement('div');
             div.className = `msg ${cls} rounded-chat`;
             if (renderMarkdown) {
@@ -1219,6 +1816,7 @@
             }
             messagesEl.appendChild(div);
             messagesEl.scrollTop = messagesEl.scrollHeight;
+            return div;
         }
 
         function clearMessages() {
@@ -1280,9 +1878,34 @@
 
         async function switchConversation(sessionId, title = '新对话') {
             currentSessionId = sessionId;
+            loadCompletedRequestIds();
             currentTitleEl.textContent = title || '新对话';
             renderConversationList();
             await loadMessages(sessionId);
+            await loadPendingState(sessionId);
+        }
+
+        async function loadPendingState(sessionId) {
+            try {
+                const user_id = userIdEl.value.trim();
+                const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/pending-state?user_id=${encodeURIComponent(user_id)}`);
+                const data = await res.json();
+                if (!res.ok) return;
+
+                // Restore pending approvals
+                const pending_approvals = Array.isArray(data.pending_approvals) ? data.pending_approvals : [];
+                pending_approvals.forEach(approval => {
+                    addApprovalRequestCard(approval);
+                });
+
+                // Restore pending choices
+                const pending_choices = Array.isArray(data.pending_choices) ? data.pending_choices : [];
+                pending_choices.forEach(choice => {
+                    addChoiceRequestCard(choice);
+                });
+            } catch (err) {
+                console.error('Failed to load pending state:', err);
+            }
         }
 
         async function bootstrap() {
@@ -1331,6 +1954,12 @@
                     data.loaded_skills || [],
                     data.activity_traces || [],
                 );
+                if (data.approval_request) {
+                    addApprovalRequestCard(data.approval_request);
+                }
+                if (data.choice_request) {
+                    addChoiceRequestCard(data.choice_request);
+                }
                 if (data.title) {
                     currentTitleEl.textContent = data.title;
                 }
@@ -1377,8 +2006,26 @@
             switchSettingsPanel('memory');
         });
 
+        settingsTabPolicyEl.addEventListener('click', () => {
+            switchSettingsPanel('policy');
+        });
+
         settingsTabSkillsEl.addEventListener('click', () => {
             switchSettingsPanel('skills');
+        });
+
+        skillUploadFileEl.addEventListener('change', () => {
+            const file = skillUploadFileEl.files && skillUploadFileEl.files[0];
+            skillUploadFileNameEl.textContent = file ? file.name : '未选择文件';
+        });
+
+        skillUploadBtnEl.addEventListener('click', async () => {
+            try {
+                settingsStatusEl.textContent = '';
+                await uploadSkillZip();
+            } catch (err) {
+                settingsStatusEl.textContent = `上传失败: ${err}`;
+            }
         });
 
         saveSettingsBtn.addEventListener('click', async () => {
