@@ -1,5 +1,0 @@
-{
-  "session_memory": "用户查询了上海和南京的天气：上海多云14°C，南京阴天16°C。随后用户要求搜索今日新闻，我从BBC新闻首页提取了今日新闻摘要，包括国际政治（伊朗-美国谈判、德国极右翼政党等）、美国政治、科技太空、娱乐文化等类别的主要新闻头条。用户多次要求压缩上下文。\n[tool] compact_context\n输出: session memory updated",
-  "pending_approval_request_id": "",
-  "approval_resume_state": {}
-}

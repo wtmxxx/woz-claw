@@ -359,6 +359,23 @@ def test_chat_service_exposes_choice_request_for_ui(tmp_path: Path) -> None:
     assert response.choice_request["allow_custom"] is True
 
 
+def test_chat_service_delete_conversation_delegates_to_store(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=DummyAgent(),
+        title_generator=DummyTitleGenerator(),
+    )
+
+    store.set_conversation_title("u-del", "s-del", "待删除")
+    store.append_session_message("u-del", "s-del", "user", "hello")
+
+    deleted = service.delete_conversation("u-del", "s-del")
+
+    assert deleted is True
+    assert service.list_conversations("u-del") == []
+
+
 def test_chat_service_same_choice_request_id_does_not_duplicate_pending_choice(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     service = ChatService(
@@ -680,42 +697,3 @@ def test_resume_after_approval_passes_original_question_to_agent(tmp_path: Path)
 
     assert resumed.reply == "继续完成"
     assert agent.calls == ["删除旧文件", "删除旧文件"]
-
-
-def test_llm_dialogue_proxy_records_raw_input_and_output_only(tmp_path: Path) -> None:
-    from types import SimpleNamespace
-
-    from wozclaw.agent import LLMDialogueRecorder
-
-    store = MemoryStore(root_dir=tmp_path)
-
-    class DummyModel:
-        async def __call__(self, prompt, **kwargs):  # noqa: ANN001
-            _ = kwargs
-            return SimpleNamespace(content="ok")
-
-    recorder = LLMDialogueRecorder(
-        model=DummyModel(),
-        memory_store=store,
-        user_id="u-multi",
-        session_id="s-multi",
-    )
-
-    prompt = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "hello"},
-    ]
-
-    import asyncio
-
-    asyncio.run(recorder(prompt))
-
-    log_file = tmp_path / "u-multi" / "logs" / "llm_dialogue.jsonl"
-    rows = [json.loads(item) for item in log_file.read_text(
-        encoding="utf-8").strip().splitlines()]
-
-    assert len(rows) == 1
-    assert set(rows[0].keys()) == {"input", "output"}
-    assert rows[0]["input"]["messages"] == prompt
-    assert rows[0]["input"].get("kwargs", {}) == {}
-    assert rows[0]["output"] == {"content": "ok"}

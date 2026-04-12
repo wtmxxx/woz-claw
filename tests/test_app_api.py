@@ -523,3 +523,95 @@ def test_get_pending_state_requires_user_id_and_session_id() -> None:
     # Missing user_id - FastAPI returns 422 for missing query params
     response = client.get("/api/sessions/s1/pending-state")
     assert response.status_code == 422
+
+
+def test_delete_conversation_api_returns_ok(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_delete_conversation(user_id: str, session_id: str) -> bool:
+        assert user_id == "u-del"
+        assert session_id == "s-del"
+        return True
+
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "delete_conversation",
+        fake_delete_conversation,
+    )
+
+    response = client.delete(
+        "/api/conversations/s-del",
+        params={"user_id": "u-del"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "deleted": True}
+
+
+def test_delete_conversation_api_rejects_invalid_ids(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_delete_conversation(user_id: str, session_id: str) -> bool:
+        _ = user_id
+        _ = session_id
+        raise ValueError("user_id and session_id are required")
+
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "delete_conversation",
+        fake_delete_conversation,
+    )
+
+    response = client.delete(
+        "/api/conversations/s-del",
+        params={"user_id": "  "},
+    )
+
+    assert response.status_code == 400
+
+
+def test_rename_conversation_api_returns_title(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_rename_conversation(user_id: str, session_id: str, title: str) -> str:
+        assert user_id == "u-rename"
+        assert session_id == "s-rename"
+        assert title == "新的标题"
+        return "新的标题"
+
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "rename_conversation",
+        fake_rename_conversation,
+    )
+
+    response = client.patch(
+        "/api/conversations/s-rename/title",
+        json={"user_id": "u-rename", "title": "新的标题"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "title": "新的标题"}
+
+
+def test_rename_conversation_api_rejects_empty_title(monkeypatch) -> None:
+    client = TestClient(app_module.app)
+
+    def fake_rename_conversation(user_id: str, session_id: str, title: str) -> str:
+        _ = user_id
+        _ = session_id
+        _ = title
+        raise ValueError("title is required")
+
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "rename_conversation",
+        fake_rename_conversation,
+    )
+
+    response = client.patch(
+        "/api/conversations/s-rename/title",
+        json={"user_id": "u-rename", "title": "   "},
+    )
+
+    assert response.status_code == 400

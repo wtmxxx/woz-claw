@@ -12,9 +12,10 @@ def test_load_llm_config_from_yaml(tmp_path: Path) -> None:
     config_file.write_text(
         """
 llm:
-  api_key: test-key
-  model: test-model
-  base_url: https://example.com/v1
+    api_key: test-key
+    model: test-model
+    base_url: https://example.com/v1
+    compact_model: test-compact-model
 """.strip(),
         encoding="utf-8",
     )
@@ -24,6 +25,7 @@ llm:
     assert config.api_key == "test-key"
     assert config.model == "test-model"
     assert config.base_url == "https://example.com/v1"
+    assert config.compact_model == "test-compact-model"
 
 
 def test_load_llm_config_falls_back_to_defaults_when_file_missing(tmp_path: Path) -> None:
@@ -32,6 +34,7 @@ def test_load_llm_config_falls_back_to_defaults_when_file_missing(tmp_path: Path
     assert config.model == "gpt-4o-mini"
     assert config.api_key == ""
     assert config.base_url == ""
+    assert config.compact_model == ""
 
 
 def test_load_agent_runtime_config_from_yaml(tmp_path: Path) -> None:

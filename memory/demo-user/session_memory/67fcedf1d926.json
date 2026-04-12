@@ -1,5 +1,0 @@
-{
-  "session_memory": "user: 调用工具问我选择哪个skill开启\nassistant: 我来帮你查看可用的技能，然后让你选择开启哪个技能。\n[tool] bash_command\n输入: ls -la \"G:\\PythonStudy\\woz-claw\\.wozclaw\\skills\\demo-user\\\"\n输出: error: bash: -c: 行 1: 寻找匹配的 `\"' 时遇到了未预期的 EOF\nassistant: 我来查看可用的技能，然后让你选择开启哪个技能。",
-  "pending_approval_request_id": "",
-  "approval_resume_state": {}
-}

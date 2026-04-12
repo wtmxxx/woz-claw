@@ -1,5 +1,0 @@
-{
-  "session_memory": "user: 当前在哪个目录下\nassistant: 检测到需要人工审批，已暂停执行并等待审批结果。\nassistant: 当前的工作目录是 `/cygdrive/g/workdir`。\n\n根据之前的会话记忆，我看到你之前也问过\"当前在哪个目录下\"，但当时被审批中断了。现在我已经成功执行了 `pwd` 命令，确认当前目录是 `/cygdrive/g/workdir`。\n\n这个路径对应 Windows 系统中的 `G:\\workdir`（因为 `/cygdrive/g/` 是 Cygwin 环境下 G 盘的挂载点）。\n\n需要我帮你查看这个目录下的内容吗？\n[tool] bash_command\n输入: pwd\n输出: /cygdrive/g/workdir",
-  "pending_approval_request_id": "",
-  "approval_resume_state": {}
-}

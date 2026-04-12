@@ -88,7 +88,12 @@ class ChatService:
 
         self.memory_store.append_session_message(
             user_id, session_id, "user", message)
-        self.memory_store.append_daily_message(user_id, "user", message)
+        self.memory_store.append_daily_message(
+            user_id,
+            "user",
+            message,
+            meta={"session_id": session_id},
+        )
 
         context = self.memory_store.load_context(
             user_id,
@@ -169,7 +174,7 @@ class ChatService:
             user_id,
             "assistant",
             reply,
-            meta=assistant_meta,
+            meta={**assistant_meta, "session_id": session_id},
         )
 
         if approval_request and str(approval_request.get("request_id", "")).strip():
@@ -254,7 +259,11 @@ class ChatService:
             self.memory_store.append_session_message(
                 user_id, session_id, "assistant", reply, meta=meta)
             self.memory_store.append_daily_message(
-                user_id, "assistant", reply, meta=meta)
+                user_id,
+                "assistant",
+                reply,
+                meta={**meta, "session_id": session_id},
+            )
             title = self.memory_store.get_conversation_title(
                 user_id, session_id) or "新对话"
             self.memory_store.set_conversation_title(
@@ -350,7 +359,11 @@ class ChatService:
             record_session_memory=record_session_memory,
         )
         self.memory_store.append_daily_message(
-            user_id, "assistant", reply, meta=assistant_meta)
+            user_id,
+            "assistant",
+            reply,
+            meta={**assistant_meta, "session_id": session_id},
+        )
 
         if approval_request and str(approval_request.get("request_id", "")).strip():
             next_req_id = str(approval_request.get("request_id", "")).strip()
@@ -513,7 +526,11 @@ class ChatService:
             self.memory_store.append_session_message(
                 user_id, session_id, "assistant", reply, meta=meta)
             self.memory_store.append_daily_message(
-                user_id, "assistant", reply, meta=meta)
+                user_id,
+                "assistant",
+                reply,
+                meta={**meta, "session_id": session_id},
+            )
             title = self.memory_store.get_conversation_title(
                 user_id, session_id) or "新对话"
             self.memory_store.set_conversation_title(
@@ -609,7 +626,11 @@ class ChatService:
             record_session_memory=record_session_memory,
         )
         self.memory_store.append_daily_message(
-            user_id, "assistant", reply, meta=assistant_meta)
+            user_id,
+            "assistant",
+            reply,
+            meta={**assistant_meta, "session_id": session_id},
+        )
         if approval_request and str(approval_request.get("request_id", "")).strip():
             next_req_id = str(approval_request.get("request_id", "")).strip()
             if runtime_agent is not None:
@@ -716,6 +737,19 @@ class ChatService:
     def list_conversations(self, user_id: str) -> list[dict[str, str]]:
         self._validate_ids(user_id, "seed")
         return self.memory_store.list_conversations(user_id)
+
+    def delete_conversation(self, user_id: str, session_id: str) -> bool:
+        self._validate_ids(user_id, session_id)
+        return self.memory_store.delete_conversation(user_id, session_id)
+
+    def rename_conversation(self, user_id: str, session_id: str, title: str) -> str:
+        self._validate_ids(user_id, session_id)
+        title_text = title.strip()
+        if not title_text:
+            raise ValueError("title is required")
+        self.memory_store.set_conversation_title(
+            user_id, session_id, title_text)
+        return self.memory_store.get_conversation_title(user_id, session_id) or "新对话"
 
     def get_session_messages(self, user_id: str, session_id: str) -> list[dict[str, Any]]:
         self._validate_ids(user_id, session_id)

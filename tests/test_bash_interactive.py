@@ -26,7 +26,7 @@ def main():
 
     # Get work directory info
     work_dir = agent._root_work_dir()
-    sandbox_dir = agent._default_sandbox_dir()
+    sandbox_dir = agent._wozclaw_dir()
 
     print("="*80)
     print("🧪 Interactive Bash Tool Tester")

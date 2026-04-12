@@ -20,6 +20,10 @@ from wozclaw.config import load_llm_config, load_path_config
 from wozclaw.memory_store import MemoryStore
 
 
+SESSION_MEMORY_COMPACT_THRESHOLD_TOKENS = 30000
+SESSION_MEMORY_COMPACT_TARGET_TOKENS = 8000
+
+
 @dataclass
 class AgentResponse:
     text: str
@@ -53,12 +57,17 @@ class LLMDialogueRecorder:
         memory_store: MemoryStore,
         user_id: str,
         session_id: str,
+        compact_model: OpenAIChatModel | None = None,
+        compact_threshold_tokens: int = SESSION_MEMORY_COMPACT_THRESHOLD_TOKENS,
     ) -> None:
         self._model = model
         self._memory_store = memory_store
         self._user_id = user_id
         self._session_id = session_id
         self._node_counter = 0
+        self._compact_model = compact_model
+        self._compact_threshold_tokens = max(1, int(compact_threshold_tokens))
+        self._auto_tool_traces: list[dict[str, str]] = []
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to wrapped model."""
@@ -66,7 +75,7 @@ class LLMDialogueRecorder:
 
     async def __call__(self, prompt: Any, **kwargs: Any) -> Any:
         """Intercept model calls to record raw LLM input/output only."""
-        self._record_tool_outputs_from_prompt(prompt)
+        await self._auto_compact_session_memory_if_needed()
         filtered_prompt = self._filter_react_messages(prompt)
         response = await self._model(filtered_prompt, **kwargs)
         try:
@@ -151,32 +160,84 @@ class LLMDialogueRecorder:
         except Exception:
             return ""
 
-    def _record_tool_outputs_from_prompt(self, prompt: Any) -> None:
-        if not isinstance(prompt, list):
+    async def _auto_compact_session_memory_if_needed(self) -> None:
+        if self._compact_model is None:
             return
 
-        for item in prompt:
-            role = self._message_field(item, "role")
-            if role != "tool":
-                continue
+        try:
+            state = self._memory_store.get_session_state(
+                self._user_id,
+                self._session_id,
+            )
+            raw_memory = str(state.get("session_memory", "")).strip()
+            if not raw_memory:
+                return
 
-            tool_name = str(self._message_field(
-                item, "name") or "tool").strip()
-            tool_output = self._tool_content_to_text(
-                self._message_field(item, "content"))
-            if not tool_output:
-                continue
+            token_count = self._estimate_text_tokens(raw_memory)
+            if token_count <= self._compact_threshold_tokens:
+                return
 
-            try:
-                self._memory_store.append_session_memory_tool_trace(
-                    self._user_id,
-                    self._session_id,
-                    tool_name,
-                    "",
-                    tool_output,
-                )
-            except Exception:
-                continue
+            compacted = await self._compact_session_memory(raw_memory)
+            compacted_text = compacted.strip()
+            if not compacted_text:
+                return
+
+            self._memory_store.update_session_state(
+                self._user_id,
+                self._session_id,
+                {"session_memory": compacted_text},
+            )
+            self._memory_store.append_session_memory_tool_trace(
+                self._user_id,
+                self._session_id,
+                "compact_context",
+                "",
+                "上下文压缩成功",
+            )
+            self._auto_tool_traces.append(
+                {
+                    "name": "compact_context",
+                    "input": "",
+                    "output": "上下文压缩成功",
+                }
+            )
+        except Exception:
+            return
+
+    def consume_auto_tool_traces(self) -> list[dict[str, str]]:
+        rows = list(self._auto_tool_traces)
+        self._auto_tool_traces = []
+        return rows
+
+    async def _compact_session_memory(self, session_memory: str) -> str:
+        prompt = (
+            "请将下面的会话记忆压缩为高密度摘要。\n"
+            f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
+            "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
+            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n\n"
+            f"原始会话记忆：\n{session_memory}"
+        )
+        response = await self._compact_model(
+            [
+                {
+                    "role": "system",
+                    "name": "system",
+                    "content": "你是上下文压缩助手，只输出压缩后的会话记忆。",
+                },
+                {
+                    "role": "user",
+                    "name": "user",
+                    "content": prompt,
+                },
+            ]
+        )
+        return self._extract_assistant_text(response)
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        content = str(text or "")
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", content))
+        other_chars = max(0, len(content) - chinese_chars)
+        return max(1, chinese_chars + ((other_chars + 3) // 4))
 
     def _tool_content_to_text(self, content: Any) -> str:
         if content is None:
@@ -283,11 +344,14 @@ class ReActMemoryAgent:
         self._active_tool_traces: list[dict[str, str]] = []
         self._active_activity_traces: list[dict[str, str]] = []
         self._loaded_skills: list[dict[str, str]] = []
+        self._compact_model: OpenAIChatModel | None = None
+        self._dialogue_recorder: LLMDialogueRecorder | None = None
         model = self._build_chat_model(
             api_key=llm_config.api_key,
             model_name=llm_config.model,
             base_url=llm_config.base_url,
             temperature=0.2,
+            compact_model_name=llm_config.compact_model,
         )
         formatter = OpenAIChatFormatter()
         toolkit = self._build_toolkit()
@@ -334,6 +398,7 @@ class ReActMemoryAgent:
             for item in self._loaded_skills
         ]
         self._set_runtime_prompt(prompt)
+        self._discard_stale_auto_tool_traces()
         self._approval_interrupt_requested = False
         self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
         self._choice_interrupt_requested = False
@@ -353,6 +418,7 @@ class ReActMemoryAgent:
                 self._agent.reply(prompt_messages)
             )
         except ApprovalInterrupt as exc:
+            self._merge_auto_tool_traces_into_runtime_traces()
             return AgentResponse(
                 text=str(exc) or "检测到需要人工审批，已暂停执行。",
                 tool_calls=list(self._active_tool_traces),
@@ -360,6 +426,7 @@ class ReActMemoryAgent:
                 activity_traces=list(self._active_activity_traces),
             )
         except ChoiceInterrupt as exc:
+            self._merge_auto_tool_traces_into_runtime_traces()
             return AgentResponse(
                 text=str(exc) or "检测到需要做出选择，已暂停执行。",
                 tool_calls=list(self._active_tool_traces),
@@ -367,11 +434,14 @@ class ReActMemoryAgent:
                 activity_traces=list(self._active_activity_traces),
             )
         except Exception:
+            self._merge_auto_tool_traces_into_runtime_traces()
             return AgentResponse(text=self._fallback.respond(user_message, memory_context), tool_calls=[])
 
         reply_text = self._msg_to_text(reply_msg)
         if not reply_text:
             reply_text = self._fallback.respond(user_message, memory_context)
+
+        self._merge_auto_tool_traces_into_runtime_traces()
 
         return AgentResponse(
             text=reply_text,
@@ -380,7 +450,14 @@ class ReActMemoryAgent:
             activity_traces=list(self._active_activity_traces),
         )
 
-    def _build_chat_model(self, api_key: str, model_name: str, base_url: str, temperature: float) -> Any:
+    def _build_chat_model(
+        self,
+        api_key: str,
+        model_name: str,
+        base_url: str,
+        temperature: float,
+        compact_model_name: str = "",
+    ) -> Any:
         client_kwargs: dict[str, Any] = {}
         if base_url.strip():
             client_kwargs["base_url"] = base_url.strip()
@@ -391,12 +468,75 @@ class ReActMemoryAgent:
             client_kwargs=client_kwargs or None,
             generate_kwargs={"temperature": temperature},
         )
-        return LLMDialogueRecorder(
+        compact_name = compact_model_name.strip() or model_name
+        try:
+            self._compact_model = OpenAIChatModel(
+                model_name=compact_name,
+                api_key=api_key,
+                stream=False,
+                client_kwargs=client_kwargs or None,
+                generate_kwargs={"temperature": 0},
+            )
+        except Exception:
+            self._compact_model = None
+        recorder = LLMDialogueRecorder(
             model,
             self.memory_store,
             self.user_id,
             self.session_id,
+            compact_model=self._compact_model,
+            compact_threshold_tokens=SESSION_MEMORY_COMPACT_THRESHOLD_TOKENS,
         )
+        self._dialogue_recorder = recorder
+        return recorder
+
+    def _discard_stale_auto_tool_traces(self) -> None:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return
+        consume = getattr(recorder, "consume_auto_tool_traces", None)
+        if not callable(consume):
+            return
+        try:
+            consume()
+        except Exception:
+            return
+
+    def _merge_auto_tool_traces_into_runtime_traces(self) -> None:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return
+        consume = getattr(recorder, "consume_auto_tool_traces", None)
+        if not callable(consume):
+            return
+
+        try:
+            auto_rows = consume()
+        except Exception:
+            return
+
+        if not isinstance(auto_rows, list):
+            return
+
+        for raw in auto_rows:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "name": str(raw.get("name", "")).strip() or "tool",
+                "input": self._stringify_tool_value(raw.get("input", "")),
+                "output": self._stringify_tool_value(raw.get("output", "")),
+            }
+            self._active_tool_traces.append(item)
+            self._active_activity_traces.append(
+                {
+                    "type": "tool",
+                    "name": item["name"],
+                    "source": "",
+                    "dir": "",
+                    "input": item["input"],
+                    "output": item["output"],
+                }
+            )
 
     def _build_toolkit(self) -> Toolkit:
         toolkit = Toolkit(
@@ -602,17 +742,12 @@ class ReActMemoryAgent:
                 raise ChoiceInterrupt("检测到需要做出选择，已暂停执行并等待用户选择。")
             return self._to_tool_response(output)
 
-        def compact_context(summary: str) -> ToolResponse:
-            """Update per-session compact memory. Pass concise, merged context summary; empty string clears it."""
-            input_payload = {"summary": summary}
+        def compact_context() -> ToolResponse:
+            """Compact current session memory automatically and return success text."""
+            input_payload: dict[str, Any] = {}
             try:
-                text = str(summary).strip()
-                self.memory_store.update_session_state(
-                    self.user_id,
-                    self.session_id,
-                    {"session_memory": text},
-                )
-                output = "session memory updated" if text else "session memory cleared"
+                self._compact_session_memory_now(force=True)
+                output = "上下文压缩成功"
             except Exception as exc:  # pragma: no cover
                 output = f"error: {exc}"
             self._record_tool_trace("compact_context", input_payload, output)
@@ -741,7 +876,7 @@ class ReActMemoryAgent:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         expanded_cmd = self._expand_bash_aliases(command)
-        work_dir_str = str(self._root_work_dir(as_bash=True))
+        work_dir_str = str(self._root_work_dir(as_bash=False))
         full_command = (
             f'cd "{work_dir_str}" && {expanded_cmd}; '
             '__wozclaw_status=$?; '
@@ -750,7 +885,7 @@ class ReActMemoryAgent:
         )
 
         cmd = ["bash", "-lc", full_command]
-        timeout_seconds = 15
+        timeout_seconds = 60
         try:
             result = subprocess.run(
                 cmd,
@@ -977,12 +1112,6 @@ class ReActMemoryAgent:
             try:
                 toolkit.register_agent_skill(str(skill_dir))
                 # Keep runtime registration path unchanged while rendering
-                # bash-style paths in the skills prompt.
-                skill_dir_text = str(skill_dir)
-                bash_dir_text = self._to_bash_path(skill_dir)
-                for skill_meta in toolkit.skills.values():
-                    if str(skill_meta.get("dir", "")) == skill_dir_text:
-                        skill_meta["dir"] = bash_dir_text
                 self._loaded_skills.append(
                     {
                         "name": item.get("name", ""),
@@ -1272,6 +1401,61 @@ class ReActMemoryAgent:
         except Exception:
             pass
 
+    def _compact_session_memory_now(self, force: bool = False) -> bool:
+        if self._compact_model is None:
+            return False
+
+        state = self.memory_store.get_session_state(
+            self.user_id, self.session_id)
+        raw_memory = str(state.get("session_memory", "")).strip()
+        if not raw_memory:
+            return False
+
+        token_count = self._estimate_text_tokens(raw_memory)
+        if not force and token_count <= SESSION_MEMORY_COMPACT_THRESHOLD_TOKENS:
+            return False
+
+        prompt = (
+            "请将下面的会话记忆压缩为高密度摘要。\n"
+            f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
+            "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
+            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n\n"
+            f"原始会话记忆：\n{raw_memory}"
+        )
+        response = self._run_async(
+            self._compact_model(
+                [
+                    {
+                        "role": "system",
+                        "name": "system",
+                        "content": "你是上下文压缩助手，只输出压缩后的会话记忆。",
+                    },
+                    {
+                        "role": "user",
+                        "name": "user",
+                        "content": prompt,
+                    },
+                ]
+            )
+        )
+        compacted = self._msg_to_text(response).strip()
+        if not compacted:
+            return False
+
+        self.memory_store.update_session_state(
+            self.user_id,
+            self.session_id,
+            {"session_memory": compacted},
+        )
+        self._refresh_prompt_with_latest_session_memory()
+        return True
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        content = str(text or "")
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", content))
+        other_chars = max(0, len(content) - chinese_chars)
+        return max(1, chinese_chars + ((other_chars + 3) // 4))
+
     def _set_runtime_prompt(self, prompt: str) -> None:
         # AgentScope exposes sys_prompt as read-only; update its backing field when available.
         if hasattr(self._agent, "_sys_prompt"):
@@ -1327,8 +1511,8 @@ class ReActMemoryAgent:
             "可使用分段读取进一步控制上下文规模。\n"
             "</BASH_POLICY>\n\n"
             "<PATHS>\n"
-            f"工作目录: {self._root_work_dir(as_bash=True)}\n"
-            f"配置目录: {self._wozclaw_dir(as_bash=True)}\n"
+            f"工作目录: {self._root_work_dir(as_bash=False)}\n"
+            f"配置目录: {self._wozclaw_dir(as_bash=False)}\n"
             "skills目录位于配置目录下。\n"
             "</PATHS>\n\n"
             f"<USER>当前用户ID: {self.user_id}</USER>\n\n"

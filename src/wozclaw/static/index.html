@@ -308,23 +308,22 @@
         }
 
         .conv-item {
-            border: 1px solid transparent;
-            border-bottom-color: var(--line);
+            border: none;
             background: transparent;
-            border-radius: 0;
-            padding: 11px 10px 11px 12px;
+            border-radius: 8px;
+            padding: 10px 10px 10px 12px;
             cursor: pointer;
             text-align: left;
             font-size: 14px;
             color: #1e293b;
             box-shadow: none;
             position: relative;
-            transition: border-color 120ms ease, background 120ms ease;
+            width: 100%;
+            transition: background 120ms ease;
         }
 
         .conv-item:hover {
-            border-color: var(--line-strong);
-            background: #eef3fb;
+            background: transparent;
         }
 
         .conv-item::before {
@@ -339,14 +338,104 @@
         }
 
         .conv-item.active {
-            border-bottom-color: var(--accent);
-            background: var(--accent-soft);
+            background: transparent;
             color: #0f3ca8;
             box-shadow: none;
         }
 
         .conv-item.active::before {
             background: var(--accent);
+        }
+
+        .conv-row {
+            display: block;
+        }
+
+        .conv-card {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: #ffffff;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 4px;
+            align-items: center;
+            transition: border-color 120ms ease, background 120ms ease;
+        }
+
+        .conv-card:hover {
+            border-color: var(--line-strong);
+            background: #f8fbff;
+        }
+
+        .conv-card.active {
+            border-color: #bfd3ff;
+            background: #f4f8ff;
+        }
+
+        .conv-main {
+            min-width: 0;
+        }
+
+        .conv-menu-wrap {
+            position: relative;
+            padding-right: 6px;
+        }
+
+        .conv-menu-trigger {
+            border: none;
+            background: transparent;
+            color: #475569;
+            border-radius: 8px;
+            width: 30px;
+            height: 30px;
+            line-height: 1;
+            font-size: 16px;
+            padding: 0;
+            cursor: pointer;
+            transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+        }
+
+        .conv-menu-trigger:hover {
+            background: transparent;
+            color: #1e293b;
+        }
+
+        .conv-menu-list {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            min-width: 120px;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            background: #ffffff;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            padding: 6px;
+            z-index: 20;
+            display: grid;
+            gap: 4px;
+        }
+
+        .conv-menu-item {
+            border: 1px solid transparent;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #334155;
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .conv-menu-item:hover {
+            background: #fff1f2;
+            color: #be123c;
+            border-color: #fecdd3;
+        }
+
+        .conv-menu-item.rename:hover {
+            background: #eef4ff;
+            color: #1d4ed8;
+            border-color: #cfe0ff;
         }
 
         .meta input {
@@ -1823,6 +1912,12 @@
             messagesEl.innerHTML = '';
         }
 
+        function closeConversationMenus() {
+            conversationListEl.querySelectorAll('.conv-menu-list').forEach((node) => {
+                node.classList.add('hidden');
+            });
+        }
+
         async function createConversation() {
             const user_id = userIdEl.value.trim();
             const res = await fetch('/api/conversations', {
@@ -1835,15 +1930,135 @@
             return data.session_id;
         }
 
+        async function deleteConversation(sessionId) {
+            const user_id = userIdEl.value.trim();
+            const res = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(user_id)}`,
+                {
+                    method: 'DELETE',
+                },
+            );
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '删除会话失败');
+
+            const deletedCurrent = currentSessionId === sessionId;
+            await loadConversations();
+
+            if (conversations.length === 0) {
+                const newSessionId = await createConversation();
+                conversations = [{ session_id: newSessionId, title: '新对话' }];
+                await switchConversation(newSessionId, '新对话');
+                return;
+            }
+
+            if (deletedCurrent) {
+                await switchConversation(conversations[0].session_id, conversations[0].title);
+                return;
+            }
+
+            renderConversationList();
+        }
+
+        async function renameConversation(sessionId, currentTitle) {
+            const user_id = userIdEl.value.trim();
+            const nextTitleRaw = window.prompt('请输入新对话名称', String(currentTitle || '新对话'));
+            if (nextTitleRaw === null) return;
+
+            const nextTitle = String(nextTitleRaw || '').trim();
+            if (!nextTitle) {
+                addMsg('a', '重命名失败: 标题不能为空');
+                return;
+            }
+
+            const res = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}/title`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id, title: nextTitle }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || '重命名失败');
+
+            if (currentSessionId === sessionId) {
+                currentTitleEl.textContent = data.title || nextTitle;
+            }
+            await loadConversations();
+            renderConversationList();
+        }
+
         function renderConversationList() {
             conversationListEl.innerHTML = '';
             conversations.forEach((item) => {
+                const row = document.createElement('div');
+                row.className = 'conv-row';
+
+                const card = document.createElement('div');
+                card.className = 'conv-card' + (item.session_id === currentSessionId ? ' active' : '');
+
                 const btn = document.createElement('button');
                 btn.type = 'button';
-                btn.className = 'conv-item w-full transition duration-150 ease-out' + (item.session_id === currentSessionId ? ' active' : '');
+                btn.className = 'conv-item conv-main transition duration-150 ease-out' + (item.session_id === currentSessionId ? ' active' : '');
                 btn.textContent = item.title || '新对话';
                 btn.addEventListener('click', () => switchConversation(item.session_id, item.title));
-                conversationListEl.appendChild(btn);
+
+                const menuWrap = document.createElement('div');
+                menuWrap.className = 'conv-menu-wrap';
+
+                const menuTrigger = document.createElement('button');
+                menuTrigger.type = 'button';
+                menuTrigger.className = 'conv-menu-trigger';
+                menuTrigger.textContent = '⋯';
+
+                const menuList = document.createElement('div');
+                menuList.className = 'conv-menu-list hidden';
+
+                const renameItem = document.createElement('button');
+                renameItem.type = 'button';
+                renameItem.className = 'conv-menu-item rename';
+                renameItem.textContent = '重命名';
+
+                const deleteItem = document.createElement('button');
+                deleteItem.type = 'button';
+                deleteItem.className = 'conv-menu-item';
+                deleteItem.textContent = '删除对话';
+
+                menuTrigger.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    const shouldShow = menuList.classList.contains('hidden');
+                    closeConversationMenus();
+                    if (shouldShow) {
+                        menuList.classList.remove('hidden');
+                    }
+                });
+
+                renameItem.addEventListener('click', async (event) => {
+                    event.stopPropagation();
+                    closeConversationMenus();
+                    try {
+                        await renameConversation(item.session_id, item.title || '新对话');
+                    } catch (err) {
+                        addMsg('a', `重命名失败: ${err}`);
+                    }
+                });
+
+                deleteItem.addEventListener('click', async (event) => {
+                    event.stopPropagation();
+                    closeConversationMenus();
+                    const ok = window.confirm('确认删除该对话吗？此操作不可恢复。');
+                    if (!ok) return;
+                    try {
+                        await deleteConversation(item.session_id);
+                    } catch (err) {
+                        addMsg('a', `删除会话失败: ${err}`);
+                    }
+                });
+
+                card.appendChild(btn);
+                menuList.appendChild(renameItem);
+                menuList.appendChild(deleteItem);
+                menuWrap.appendChild(menuTrigger);
+                menuWrap.appendChild(menuList);
+                card.appendChild(menuWrap);
+                row.appendChild(card);
+                conversationListEl.appendChild(row);
             });
         }
 
@@ -1988,6 +2203,10 @@
             currentSessionId = null;
             syncUserProfile();
             await bootstrap();
+        });
+
+        document.addEventListener('click', () => {
+            closeConversationMenus();
         });
 
         openSettingsBtn.addEventListener('click', async () => {

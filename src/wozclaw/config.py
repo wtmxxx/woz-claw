@@ -12,6 +12,7 @@ class LLMConfig:
     api_key: str
     model: str
     base_url: str
+    compact_model: str = ""
 
 
 @dataclass
@@ -44,6 +45,7 @@ def load_llm_config(config_path: Path | str = "config/llm.yaml") -> LLMConfig:
         api_key=str(llm_data.get("api_key", "")),
         model=str(llm_data.get("model", "gpt-4o-mini")),
         base_url=str(llm_data.get("base_url", "")),
+        compact_model=str(llm_data.get("compact_model", "")),
     )
 
 

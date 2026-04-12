@@ -28,6 +28,11 @@ class CreateConversationRequest(BaseModel):
     user_id: str
 
 
+class RenameConversationRequest(BaseModel):
+    user_id: str
+    title: str
+
+
 class SkillToggle(BaseModel):
     name: str
     enabled: bool
@@ -123,6 +128,28 @@ def list_conversations(user_id: str) -> dict[str, list[dict[str, str]]]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"items": rows}
+
+
+@app.delete("/api/conversations/{session_id}")
+def delete_conversation(user_id: str, session_id: str) -> dict[str, bool]:
+    try:
+        deleted = chat_service.delete_conversation(user_id, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "deleted": deleted}
+
+
+@app.patch("/api/conversations/{session_id}/title")
+def rename_conversation(session_id: str, req: RenameConversationRequest) -> dict[str, Any]:
+    try:
+        title = chat_service.rename_conversation(
+            req.user_id,
+            session_id,
+            req.title,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "title": title}
 
 
 @app.get("/api/conversations/{session_id}/messages")

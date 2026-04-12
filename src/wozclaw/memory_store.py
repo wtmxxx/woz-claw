@@ -234,6 +234,37 @@ class MemoryStore:
         result.sort(key=lambda item: item["updated_at"], reverse=True)
         return result
 
+    def delete_conversation(self, user_id: str, session_id: str) -> bool:
+        user_text = user_id.strip()
+        session_text = session_id.strip()
+        if not user_text or not session_text:
+            return False
+
+        removed_any = False
+
+        conv_path = self._conversation_file(user_text)
+        rows = self._read_json(conv_path)
+        if session_text in rows:
+            rows.pop(session_text, None)
+            self._write_json(conv_path, rows)
+            removed_any = True
+
+        for path in [
+            self._session_file(user_text, session_text),
+            self._session_state_file(user_text, session_text),
+            self._approvals_file(user_text, session_text),
+            self._choices_file(user_text, session_text),
+            self._react_state_file(user_text, session_text),
+        ]:
+            if path.exists():
+                path.unlink()
+                removed_any = True
+
+        if self._delete_daily_messages_by_session(user_text, session_text):
+            removed_any = True
+
+        return removed_any
+
     def get_long_term_memory(self, user_id: str) -> str:
         path = self._long_term_file(user_id)
         if not path.exists():
@@ -719,6 +750,41 @@ class MemoryStore:
                     continue
                 rows.append(json.loads(line))
         return rows
+
+    def _delete_daily_messages_by_session(self, user_id: str, session_id: str) -> bool:
+        daily_dir = self._user_root(user_id) / "daily"
+        if not daily_dir.exists():
+            return False
+
+        removed = False
+        for file in sorted(daily_dir.glob("*.jsonl")):
+            rows = self._read_jsonl(file)
+            if not rows:
+                continue
+
+            kept_rows: list[dict[str, Any]] = []
+            changed = False
+            for row in rows:
+                meta = row.get("meta") if isinstance(row, dict) else None
+                row_session_id = ""
+                if isinstance(meta, dict):
+                    row_session_id = str(meta.get("session_id", "")).strip()
+
+                if row_session_id == session_id:
+                    changed = True
+                    continue
+                kept_rows.append(row)
+
+            if not changed:
+                continue
+
+            removed = True
+            if kept_rows:
+                self._write_jsonl(file, kept_rows)
+            else:
+                file.unlink()
+
+        return removed
 
     def _write_jsonl(self, path: Path, rows: list[dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

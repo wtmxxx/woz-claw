@@ -109,7 +109,7 @@ def test_llm_dialogue_recorder_filters_react_messages_to_system_and_session_memo
     assert filtered[1]["name"] == "session_memory"
 
 
-def test_llm_dialogue_recorder_records_tool_role_output_into_session_memory(tmp_path: Path) -> None:
+def test_llm_dialogue_recorder_does_not_persist_tool_role_output_into_session_memory(tmp_path: Path) -> None:
     class DummyModel:
         async def __call__(self, prompt, **kwargs):
             _ = prompt
@@ -136,8 +136,8 @@ def test_llm_dialogue_recorder_records_tool_role_output_into_session_memory(tmp_
 
     state = store.get_session_state("u-tool", "s-tool")
     text = str(state.get("session_memory", ""))
-    assert "[tool] bash_command" in text
-    assert "输出: cwd=/workdir/demo" in text
+    assert "[tool] bash_command" not in text
+    assert "cwd=/workdir/demo" not in text
 
 
 def test_llm_dialogue_recorder_injects_latest_session_memory_for_each_react_node(tmp_path: Path) -> None:
@@ -185,6 +185,53 @@ def test_llm_dialogue_recorder_injects_latest_session_memory_for_each_react_node
     assert "[tool] search_daily" in str(content[0].get("text", ""))
 
 
+def test_llm_dialogue_recorder_auto_compacts_session_memory_before_react_node(tmp_path: Path) -> None:
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "ok"}])
+
+    class DummyCompactModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "压缩后的会话记忆"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    # ASCII text token estimate is roughly len/4, so this is > 30k tokens.
+    store.update_session_state(
+        "u-compact",
+        "s-compact",
+        {"session_memory": "a" * 124000},
+    )
+
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-compact",
+        "s-compact",
+        compact_model=DummyCompactModel(),
+        compact_threshold_tokens=30000,
+    )
+
+    prompt = [
+        {"role": "system", "name": "system", "content": [
+            {"type": "text", "text": "sys"}]},
+        {"role": "user", "name": "user", "content": [
+            {"type": "text", "text": "继续"}]},
+    ]
+
+    asyncio.run(recorder(prompt))
+
+    state = store.get_session_state("u-compact", "s-compact")
+    text = str(state.get("session_memory", ""))
+    assert text.startswith("压缩后的会话记忆")
+    assert "assistant: 上下文压缩成功。" not in text
+    assert "[tool] compact_context" in text
+    assert "输出: 上下文压缩成功" in text
+
+
 def test_respond_handles_read_only_sys_prompt(monkeypatch, tmp_path) -> None:
     class DummyReadOnlyPromptAgent:
         @property
@@ -217,6 +264,47 @@ def test_respond_returns_immediately_on_approval_interrupt(tmp_path) -> None:
     result = agent.respond("执行危险命令", "上下文")
 
     assert result.text == "需要人工审批后继续"
+
+
+def test_respond_includes_auto_compact_trace_in_activity_traces(tmp_path: Path) -> None:
+    class DummyAgent:
+        async def reply(self, msg):  # noqa: ANN001
+            _ = msg
+            return SimpleNamespace(content="ok")
+
+    class DummyRecorder:
+        def __init__(self) -> None:
+            self._calls = 0
+            self._rows = [
+                {
+                    "name": "compact_context",
+                    "input": "",
+                    "output": "上下文压缩成功",
+                }
+            ]
+
+        def consume_auto_tool_traces(self):
+            self._calls += 1
+            if self._calls == 1:
+                return []
+            rows = list(self._rows)
+            self._rows = []
+            return rows
+
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-auto-trace", session_id="s-auto-trace")
+    agent._agent = DummyAgent()  # type: ignore[assignment]
+    agent._dialogue_recorder = DummyRecorder()  # type: ignore[assignment]
+
+    result = agent.respond("继续", "上下文")
+
+    assert result.text == "ok"
+    assert any(item.get("name") == "compact_context"
+               for item in result.tool_calls)
+    assert any(
+        item.get("type") == "tool" and item.get("name") == "compact_context"
+        for item in result.activity_traces
+    )
 
 
 def test_respond_cancels_running_reply_when_approval_flag_set(tmp_path) -> None:
@@ -284,7 +372,7 @@ def test_record_tool_trace_respects_session_memory_filters(tmp_path) -> None:
         memory_store=store, user_id="u-node2", session_id="s-node2")
 
     agent._record_tool_trace(
-        "compact_context", '{"summary":"x"}', "session memory updated")
+        "compact_context", '{"summary":"x"}', "上下文压缩成功")
     agent._record_tool_trace(
         "bash_command",
         "rm root/a.txt",
@@ -295,7 +383,7 @@ def test_record_tool_trace_respects_session_memory_filters(tmp_path) -> None:
     text = str(state.get("session_memory", ""))
     assert "[tool] compact_context" in text
     assert '输入: {"summary":"x"}' not in text
-    assert "输出: session memory updated" in text
+    assert "输出: 上下文压缩成功" in text
     assert "__APPROVAL_REQUIRED__" not in text
 
 

@@ -1,5 +1,0 @@
-{
-  "session_memory": "user: 看看目录下面有什么，并且让我选择详细看哪个部分\nassistant: 检测到需要人工审批，已暂停执行并等待审批结果。\n[tool] bash_command\n输入: {\"command\": \"ls -la root/\"}\n输出: __APPROVAL_REQUIRED__{\"request_id\": \"d9cef040ce17\", \"command\": \"ls -la root/\", \"operation\": \"read\", \"reason\": \"operation read policy\"}\nassistant: 好的，我已经看到了目录结构。现在让我为你列出更详细的信息，然后你可以选择要查看哪个部分：\n\n**目录内容：**\n1. **rag-demo/** - 目录\n2. **README.md** - 文件（66字节）\n3. **reports/** - 目录  \n4. **snake-game/** - 目录\n5. **test-del/** - 目录\n\n请选择你想要详细查看的部分：\n1. 查看 rag-demo 目录内容\n2. 查看 README.md 文件内容\n3. 查看 reports 目录内容\n4. 查看 snake-game 目录内容\n5. 查看 test-del 目录内容\n6. 查看所有目录的详细内容\n\n或者你也可以告诉我你想查看的具体文件或目录名称。\n[tool] bash_command\n输入: ls -la root/\n输出: 总用量 17\ndrwxr-xr-x 1 I I  0  4月 11 16:02 .\ndrwxr-xr-x 1 I I  0  4月 11 00:49 ..\ndrwxr-xr-x 1 I I  0  4月 11 16:02 rag-demo\n-rw-r--r-- 1 I I 66  4月 10 18:14 README.md\ndrwxr-xr-x 1 I I  0  4月 11 15:05 reports\ndrwxr-xr-x 1 I I  0  4月 10 21:09 snake-game\ndrwxr-xr-x 1 I I  0  4月 10 19:55 test-del",
-  "pending_approval_request_id": "",
-  "approval_resume_state": {}
-}

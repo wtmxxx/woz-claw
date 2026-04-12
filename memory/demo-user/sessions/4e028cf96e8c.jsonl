@@ -1,3 +1,0 @@
-{"ts": "2026-04-12T03:38:14", "role": "user", "content": "调用工具问我选择哪个skill开启", "tags": ["session"], "meta": {}, "message_id": 1}
-{"ts": "2026-04-12T03:38:19", "role": "assistant", "content": "检测到需要人工审批，已暂停执行并等待审批结果。", "tags": ["session"], "meta": {}, "message_id": 2}
-{"ts": "2026-04-12T03:38:30", "role": "assistant", "content": "检测到需要人工审批，已暂停执行并等待审批结果。", "tags": ["session"], "meta": {"tool_calls": [{"name": "bash_command", "input": "find \"G:\\PythonStudy\\woz-claw\\.wozclaw\\skills\" -type f -name \"*.py\" | head -20", "output": "ok"}], "activity_traces": [{"type": "tool", "name": "bash_command", "source": "", "dir": "", "input": "find \"G:\\PythonStudy\\woz-claw\\.wozclaw\\skills\" -type f -name \"*.py\" | head -20", "output": "ok"}]}, "message_id": 3}

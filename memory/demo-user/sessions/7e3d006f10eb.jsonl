@@ -1,3 +1,0 @@
-{"ts": "2026-04-12T02:45:04", "role": "user", "content": "你在哪个目录", "tags": ["session"], "meta": {}, "message_id": 1}
-{"ts": "2026-04-12T02:45:09", "role": "assistant", "content": "检测到需要人工审批，已暂停执行并等待审批结果。", "tags": ["session"], "meta": {}, "message_id": 2}
-{"ts": "2026-04-12T02:45:17", "role": "assistant", "content": "根据刚才的命令执行结果，我当前在 `/cygdrive/g/workdir` 目录下。\n\n从路径映射来看，这对应的是 Windows 系统中的 `G:\\workdir` 目录，这也是配置中提到的默认工作目录。", "tags": ["session"], "meta": {"tool_calls": [{"name": "bash_command", "input": "pwd", "output": "/cygdrive/g/workdir"}], "activity_traces": [{"type": "tool", "name": "bash_command", "source": "", "dir": "", "input": "pwd", "output": "/cygdrive/g/workdir"}]}, "message_id": 3}

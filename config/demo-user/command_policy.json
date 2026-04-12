@@ -2,14 +2,15 @@
   "enabled": true,
   "default_action": "ask_human",
   "operations": {
-    "read": "ask_human",
+    "read": "allow",
     "write": "ask_human",
     "delete": "ask_human",
     "exec": "ask_human"
   },
   "allowed_paths": [],
   "command_allowlist": [
-    "ls"
+    "ls",
+    "curl"
   ],
   "command_blocklist": []
 }

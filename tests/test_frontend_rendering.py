@@ -323,3 +323,41 @@ def test_frontend_approval_submit_renders_status_and_tracks_completed_requests()
     assert "loadCompletedRequestIds();" in html
     assert "removeRequestCardsById('approval', requestId);" in html
     assert "removeRequestCardsById('choice', requestId);" in html
+
+
+def test_frontend_conversation_list_supports_delete_action() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    trigger_start = html.index(".conv-menu-trigger {")
+    trigger_end = html.index("}", trigger_start)
+    trigger_block = html[trigger_start:trigger_end]
+    trigger_hover_start = html.index(".conv-menu-trigger:hover {")
+    trigger_hover_end = html.index("}", trigger_hover_start)
+    trigger_hover_block = html[trigger_hover_start:trigger_hover_end]
+    item_hover_start = html.index(".conv-item:hover {")
+    item_hover_end = html.index("}", item_hover_start)
+    item_hover_block = html[item_hover_start:item_hover_end]
+    item_active_start = html.index(".conv-item.active {")
+    item_active_end = html.index("}", item_active_start)
+    item_active_block = html[item_active_start:item_active_end]
+
+    assert "className = 'conv-card'" in html
+    assert ".conv-card {" in html
+    assert "border-radius: 10px;" in html
+    assert "className = 'conv-menu-trigger'" in html
+    assert "textContent = '⋯'" in html
+    assert "background: transparent;" in trigger_block
+    assert "border: none;" in trigger_block
+    assert "background: #ffffff;" not in trigger_block
+    assert "background: transparent;" in trigger_hover_block
+    assert "background: #eef3fb;" not in trigger_hover_block
+    assert "background: transparent;" in item_hover_block
+    assert "background: transparent;" in item_active_block
+    assert "background: var(--accent-soft);" not in item_active_block
+    assert "className = 'conv-menu-list hidden'" in html
+    assert "textContent = '重命名'" in html
+    assert "await renameConversation(item.session_id, item.title || '新对话');" in html
+    assert "textContent = '删除对话'" in html
+    assert "await deleteConversation(item.session_id);" in html
+    assert "fetch(`/api/conversations/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(user_id)}`" in html

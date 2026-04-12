@@ -1,8 +1,0 @@
-{
-  "session_memory": "user: 调用工具让我选择我接下来要做什么\nassistant: 检测到需要做出选择，已暂停执行并等待用户选择。\nuser: 针对问题【你想接下来做什么呢？】我的选择是：查看目前有哪些skills\nassistant: 检测到需要人工审批，已暂停执行并等待审批结果。",
-  "pending_approval_request_id": "4776d3acce72",
-  "approval_resume_state": {
-    "user_message": "针对问题【你想接下来做什么呢？】我的选择是：查看目前有哪些skills",
-    "prompt_context": "[SESSION]\nuser: 调用工具让我选择我接下来要做什么\nassistant: 检测到需要做出选择，已暂停执行并等待用户选择。\nuser: 针对问题【你想接下来做什么呢？】我的选择是：查看目前有哪些skills\n[LONG_TERM]\n## 用户特征\n\n### 个人特质\n- 是一个感性的人\n\n### 基本信息\n- 生日：2005年10月5日\n\n### 兴趣爱好\n- 喜欢游泳\n- 喜欢吃人参果\n- 喜欢吃姑娘果\n- 喜欢吃花香蓝莓\n- 喜欢吃折耳根\n- 喜欢编程\n- 对美食烹饪感兴趣\n\n### 学习与技能\n- 正在学习Java编程语言\n\n### 沟通偏好\n- 喜欢助手直接帮忙做事，而不是反复询问确认\n- 倾向于让助手主动搜索信息而不是等待用户提供\n[SESSION_MEMORY]\nuser: 调用工具让我选择我接下来要做什么\nassistant: 检测到需要做出选择，已暂停执行并等待用户选择。\nuser: 针对问题【你想接下来做什么呢？】我的选择是：查看目前有哪些skills"
-  }
-}

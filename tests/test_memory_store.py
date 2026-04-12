@@ -418,6 +418,47 @@ def test_session_memory_ignores_approval_interrupt_error_text(tmp_path: Path) ->
     assert "[tool] bash_command" not in text
 
 
+def test_delete_conversation_removes_related_files_and_daily_rows(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+
+    store.set_conversation_title("u20", "s20", "会话20")
+    store.append_session_message("u20", "s20", "user", "会话消息")
+    store.update_session_state("u20", "s20", {"session_memory": "摘要"})
+    store.create_pending_approval("u20", "s20", {"command": "rm a.txt"})
+    store.create_pending_choice("u20", "s20", {"question": "选哪个"})
+    store.append_daily_message(
+        "u20",
+        "assistant",
+        "来自会话20",
+        meta={"session_id": "s20"},
+    )
+    store.append_daily_message(
+        "u20",
+        "assistant",
+        "来自其它会话",
+        meta={"session_id": "s-other"},
+    )
+
+    deleted = store.delete_conversation("u20", "s20")
+
+    assert deleted is True
+    assert store.list_conversations("u20") == []
+    assert not (tmp_path / "u20" / "sessions" / "s20.jsonl").exists()
+    assert not (tmp_path / "u20" / "session_memory" / "s20.json").exists()
+    assert not (tmp_path / "u20" / "approvals" / "s20.json").exists()
+    assert not (tmp_path / "u20" / "choices" / "s20.json").exists()
+
+    daily_rows = store.search_daily_messages("u20", keyword="会话", limit=20)
+    contents = [row["content"] for row in daily_rows]
+    assert "来自会话20" not in contents
+    assert "来自其它会话" in contents
+
+
+def test_delete_conversation_returns_false_when_nothing_exists(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    assert store.delete_conversation("u-empty", "s-empty") is False
+
+
 def test_session_memory_ignores_choice_interrupt_error_text(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
 
