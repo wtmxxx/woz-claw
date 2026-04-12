@@ -365,11 +365,57 @@ class MemoryStore:
 
         replaced = False
         session_path = self._session_file(user_id, session_id)
-        if self._replace_approval_placeholder_in_jsonl(session_path, req, output):
+        if self._replace_placeholder_in_jsonl(
+            session_path,
+            req,
+            output,
+            marker="__APPROVAL_REQUIRED__",
+            expected_tool_name="bash_command",
+        ):
             replaced = True
 
         daily_path = self._daily_file(user_id)
-        if self._replace_approval_placeholder_in_jsonl(daily_path, req, output):
+        if self._replace_placeholder_in_jsonl(
+            daily_path,
+            req,
+            output,
+            marker="__APPROVAL_REQUIRED__",
+            expected_tool_name="bash_command",
+        ):
+            replaced = True
+
+        return replaced
+
+    def replace_choice_placeholder_output(
+        self,
+        user_id: str,
+        session_id: str,
+        request_id: str,
+        output: str,
+    ) -> bool:
+        req = request_id.strip()
+        if not req:
+            return False
+
+        replaced = False
+        session_path = self._session_file(user_id, session_id)
+        if self._replace_placeholder_in_jsonl(
+            session_path,
+            req,
+            output,
+            marker="__CHOICE_REQUIRED__",
+            expected_tool_name="ask_human_choice",
+        ):
+            replaced = True
+
+        daily_path = self._daily_file(user_id)
+        if self._replace_placeholder_in_jsonl(
+            daily_path,
+            req,
+            output,
+            marker="__CHOICE_REQUIRED__",
+            expected_tool_name="ask_human_choice",
+        ):
             replaced = True
 
         return replaced
@@ -794,13 +840,14 @@ class MemoryStore:
                     continue
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def _replace_approval_placeholder_in_jsonl(
+    def _replace_placeholder_in_jsonl(
         self,
         path: Path,
         request_id: str,
         output: str,
+        marker: str,
+        expected_tool_name: str,
     ) -> bool:
-        marker = "__APPROVAL_REQUIRED__"
         rows = self._read_jsonl(path)
         if not rows:
             return False
@@ -825,9 +872,9 @@ class MemoryStore:
                     next_tool_calls.append(item)
                     continue
 
-                tool_name = str(item.get("name", ""))
+                item_tool_name = str(item.get("name", ""))
                 tool_output = str(item.get("output", ""))
-                if tool_name != "bash_command" or not tool_output.startswith(marker):
+                if item_tool_name != expected_tool_name or not tool_output.startswith(marker):
                     next_tool_calls.append(item)
                     continue
 
@@ -864,7 +911,7 @@ class MemoryStore:
                     trace_type = str(trace.get("type", ""))
                     trace_name = str(trace.get("name", ""))
                     trace_output = str(trace.get("output", ""))
-                    if trace_type == "tool" and trace_name == "bash_command" and trace_output.startswith(marker):
+                    if trace_type == "tool" and trace_name == expected_tool_name and trace_output.startswith(marker):
                         payload_text = trace_output[len(marker):].strip()
                         try:
                             payload = json.loads(payload_text)

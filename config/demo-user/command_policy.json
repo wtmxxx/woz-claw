@@ -3,14 +3,11 @@
   "default_action": "ask_human",
   "operations": {
     "read": "allow",
-    "write": "ask_human",
-    "delete": "ask_human",
-    "exec": "ask_human"
+    "write": "allow",
+    "delete": "allow",
+    "exec": "allow"
   },
   "allowed_paths": [],
-  "command_allowlist": [
-    "ls",
-    "curl"
-  ],
+  "command_allowlist": [],
   "command_blocklist": []
 }

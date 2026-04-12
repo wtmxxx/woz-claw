@@ -579,6 +579,165 @@
             line-height: 1.45;
         }
 
+        .realtime-trace {
+            border: 1px solid #dbe3ef;
+            background: #f8fafc;
+            border-radius: var(--radius-sm);
+            padding: 10px 12px;
+            font-size: 13px;
+            color: #334155;
+            margin: 8px 0;
+        }
+
+        .realtime-trace .trace-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            user-select: none;
+            padding: 4px 0;
+        }
+
+        .realtime-trace .trace-header:hover {
+            opacity: 0.8;
+        }
+
+        .realtime-trace .trace-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            font-size: 10px;
+            color: #64748b;
+            transition: transform 200ms ease;
+        }
+
+        .realtime-trace .trace-toggle.expanded {
+            transform: rotate(90deg);
+        }
+
+        .realtime-trace .trace-icon {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        .realtime-trace .trace-icon.running {
+            background: #fef3c7;
+            color: #d97706;
+            animation: pulse 1.5s infinite;
+        }
+
+        .realtime-trace .trace-icon.completed {
+            background: #d1fae5;
+            color: #059669;
+        }
+
+        .realtime-trace .trace-icon.pending {
+            background: #fce7f3;
+            color: #d946ef;
+            animation: pulse 1.5s infinite;
+        }
+
+        .realtime-trace .trace-name {
+            font-weight: 700;
+            color: #1e40af;
+        }
+
+        .realtime-trace .trace-status {
+            font-size: 11px;
+            color: #64748b;
+            margin-left: auto;
+        }
+
+        .realtime-trace .trace-content {
+            margin-left: 26px;
+        }
+
+        .realtime-trace .trace-input {
+            margin-top: 4px;
+        }
+
+        .realtime-trace .trace-content.collapsed .trace-input {
+            display: none;
+        }
+
+        .realtime-trace .trace-output {
+            margin-top: 4px;
+            display: none;
+        }
+
+        .realtime-trace .trace-content.expanded .trace-output {
+            display: block;
+        }
+
+        .realtime-trace .trace-input pre,
+        .realtime-trace .trace-output pre {
+            margin: 4px 0 0;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: #f1f5f9;
+            border: 1px solid #dbe3ef;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .realtime-trace .trace-output pre {
+            background: #ecfdf5;
+            border-color: #a7f3d0;
+        }
+
+        .realtime-trace .trace-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .realtime-trace .collapsible {
+            cursor: pointer;
+        }
+
+        .realtime-trace .collapsible::before {
+            content: '▶ ';
+            font-size: 10px;
+        }
+
+        .realtime-trace .collapsible.expanded::before {
+            content: '▼ ';
+        }
+
+        .realtime-trace .collapsible-content {
+            display: none;
+        }
+
+        .realtime-trace .collapsible-content.expanded {
+            display: block;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
         .composer {
             margin: 0;
             border-top: 1px solid var(--line);
@@ -1233,6 +1392,9 @@
         let currentSessionId = null;
         let conversations = [];
         let completedRequestIds = new Set();
+        let eventSource = null;
+        let pendingTraces = {};
+        let disconnectTimer = null;
 
         function completedRequestStorageKey() {
             const userId = userIdEl.value.trim() || 'demo-user';
@@ -1293,6 +1455,331 @@
             div.textContent = String(text || '').trim();
             messagesEl.appendChild(div);
             messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function connectEventSource(sessionId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+            if (disconnectTimer) {
+                clearTimeout(disconnectTimer);
+                disconnectTimer = null;
+            }
+
+            const user_id = userIdEl.value.trim();
+            eventSource = new EventSource(`/api/chat/stream/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(user_id)}`);
+
+            eventSource.onmessage = function (event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleToolTraceEvent(data);
+                } catch (err) {
+                    console.warn('Failed to parse SSE event:', err);
+                }
+            };
+
+            eventSource.onerror = function (err) {
+                console.error('SSE error:', err);
+            };
+        }
+
+        function disconnectEventSource() {
+            if (disconnectTimer) {
+                clearTimeout(disconnectTimer);
+                disconnectTimer = null;
+            }
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        function scheduleDisconnectEventSource(delayMs = 250) {
+            if (disconnectTimer) {
+                clearTimeout(disconnectTimer);
+            }
+            disconnectTimer = setTimeout(() => {
+                disconnectTimer = null;
+                disconnectEventSource();
+            }, delayMs);
+        }
+
+        function handleToolTraceEvent(event) {
+            const type = event.type;
+            const sessionId = event.session_id;
+
+            if (sessionId !== currentSessionId) {
+                return;
+            }
+
+            if (type === 'heartbeat') {
+                return;
+            }
+
+            if (type === 'status') {
+                handleStatusEvent(event);
+                return;
+            }
+
+            if (type === 'tool_calling') {
+                handleToolCallingEvent(event);
+                return;
+            }
+
+            if (type === 'tool_called') {
+                handleToolCalledEvent(event);
+                return;
+            }
+        }
+
+        function handleStatusEvent(event) {
+            const status = event.status;
+            const message = event.message || '';
+
+            if (status === 'started') {
+                addTransientStatusMsg('正在处理请求...');
+            } else if (status === 'agent_ready') {
+                clearTransientStatusMessages();
+                addTransientStatusMsg('Agent 准备就绪，开始执行...');
+            } else if (status === 'generating_reply') {
+                clearTransientStatusMessages();
+                addTransientStatusMsg('正在生成回复...');
+            } else if (status === 'completed') {
+                clearTransientStatusMessages();
+                scheduleDisconnectEventSource();
+            }
+        }
+
+        function handleToolCallingEvent(event) {
+            const name = event.name || 'unknown';
+            const input = event.input || '';
+            const traceId = String(event.trace_id || event.traceId || '').trim() || `realtime-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+            const existingTraceEl = document.querySelector(`[data-trace-id="${traceId}"]`);
+            if (existingTraceEl) {
+                const nameSpan = existingTraceEl.querySelector('.trace-name');
+                const status = existingTraceEl.querySelector('.trace-status');
+                const inputPre = existingTraceEl.querySelector('.trace-input pre');
+                const icon = existingTraceEl.querySelector('.trace-icon');
+
+                if (nameSpan) {
+                    nameSpan.textContent = `正在调用: ${name}`;
+                }
+                if (status) {
+                    status.textContent = '运行中...';
+                }
+                if (inputPre) {
+                    inputPre.textContent = input || '(无输入)';
+                }
+                if (icon) {
+                    icon.className = 'trace-icon running';
+                    icon.textContent = '⏳';
+                }
+
+                existingTraceEl.dataset.traceName = name;
+                existingTraceEl.dataset.traceStatus = 'running';
+                existingTraceEl.classList.remove('completed', 'pending');
+
+                pendingTraces[traceId] = {
+                    name: name,
+                    input: input,
+                    output: pendingTraces[traceId]?.output || null,
+                    completed: false,
+                    expanded: Boolean(pendingTraces[traceId]?.expanded),
+                    status: 'running'
+                };
+
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                return;
+            }
+
+            pendingTraces[traceId] = {
+                name: name,
+                input: input,
+                output: null,
+                completed: false,
+                expanded: false,
+                status: 'running'
+            };
+
+            let block = getLatestAssistantBlock();
+            if (!block) {
+                block = document.createElement('div');
+                block.className = 'assistant-block space-y-2';
+                messagesEl.appendChild(block);
+            }
+
+            const traceEl = document.createElement('div');
+            traceEl.className = 'realtime-trace rounded-xl border border-slate-200 bg-slate-50/80';
+            traceEl.id = traceId;
+            traceEl.dataset.traceId = traceId;
+            traceEl.dataset.traceName = name;
+
+            const header = document.createElement('div');
+            header.className = 'trace-header';
+
+            const toggle = document.createElement('span');
+            toggle.className = 'trace-toggle';
+            toggle.textContent = '▶';
+
+            const icon = document.createElement('span');
+            icon.className = 'trace-icon running';
+            icon.textContent = '⏳';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'trace-name';
+            nameSpan.textContent = `正在调用: ${name}`;
+
+            const status = document.createElement('span');
+            status.className = 'trace-status';
+            status.textContent = '运行中...';
+
+            header.appendChild(toggle);
+            header.appendChild(icon);
+            header.appendChild(nameSpan);
+            header.appendChild(status);
+
+            const content = document.createElement('div');
+            content.className = 'trace-content';
+
+            const inputDiv = document.createElement('div');
+            inputDiv.className = 'trace-input';
+
+            const inputLabel = document.createElement('div');
+            inputLabel.className = 'trace-label';
+            inputLabel.textContent = '📥 输入:';
+
+            const inputContent = document.createElement('pre');
+            inputContent.textContent = input || '(无输入)';
+
+            inputDiv.appendChild(inputLabel);
+            inputDiv.appendChild(inputContent);
+
+            const outputDiv = document.createElement('div');
+            outputDiv.className = 'trace-output';
+
+            const outputLabel = document.createElement('div');
+            outputLabel.className = 'trace-label';
+            outputLabel.textContent = '📤 输出:';
+
+            const outputContent = document.createElement('pre');
+            outputContent.textContent = '处理中...';
+
+            outputDiv.appendChild(outputLabel);
+            outputDiv.appendChild(outputContent);
+
+            content.appendChild(inputDiv);
+            content.appendChild(outputDiv);
+
+            // Toggle expand/collapse on header click
+            header.addEventListener('click', function () {
+                const expanded = content.classList.toggle('expanded');
+                toggle.classList.toggle('expanded', expanded);
+                if (pendingTraces[traceId]) {
+                    pendingTraces[traceId].expanded = expanded;
+                }
+            });
+
+            traceEl.appendChild(header);
+            traceEl.appendChild(content);
+
+            block.appendChild(traceEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function handleToolCalledEvent(event) {
+            const output = event.output || '';
+            const traceId = String(event.trace_id || event.traceId || '').trim();
+
+            const isApprovalPlaceholder = output.startsWith('__APPROVAL_REQUIRED__');
+            const isChoicePlaceholder = output.startsWith('__CHOICE_REQUIRED__');
+            const isRejectedByHuman = String(output || '').trim() === 'rejected by human';
+
+            const applyTraceUpdate = (traceEl) => {
+                if (!traceEl) {
+                    return false;
+                }
+
+                const icon = traceEl.querySelector('.trace-icon');
+                const status = traceEl.querySelector('.trace-status');
+                const outputDiv = traceEl.querySelector('.trace-output');
+                const outputContent = outputDiv ? outputDiv.querySelector('pre') : null;
+
+                if (!icon || !status || !outputContent) {
+                    return false;
+                }
+
+                if (isApprovalPlaceholder) {
+                    icon.className = 'trace-icon pending';
+                    icon.textContent = '⏸';
+                    status.textContent = '待批准';
+                    traceEl.dataset.traceStatus = 'approval-pending';
+                    traceEl.classList.remove('completed');
+                    traceEl.classList.add('pending');
+                    const marker = '__APPROVAL_REQUIRED__';
+                    const raw = String(output || '').slice(marker.length).trim();
+                    try {
+                        const parsed = JSON.parse(raw);
+                        const requestId = String(parsed?.request_id || '').trim();
+                        if (requestId) {
+                            traceEl.dataset.approvalRequestId = requestId;
+                        }
+                    } catch (err) {
+                        // Keep UI non-blocking even when placeholder payload is malformed.
+                    }
+                } else if (isChoicePlaceholder) {
+                    icon.className = 'trace-icon pending';
+                    icon.textContent = '❓';
+                    status.textContent = '待选择';
+                    traceEl.dataset.traceStatus = 'choice-pending';
+                    traceEl.classList.remove('completed');
+                    traceEl.classList.add('pending');
+                    const marker = '__CHOICE_REQUIRED__';
+                    const raw = String(output || '').slice(marker.length).trim();
+                    try {
+                        const parsed = JSON.parse(raw);
+                        const requestId = String(parsed?.request_id || '').trim();
+                        if (requestId) {
+                            traceEl.dataset.choiceRequestId = requestId;
+                        }
+                    } catch (err) {
+                        // Keep UI non-blocking even when placeholder payload is malformed.
+                    }
+                } else if (isRejectedByHuman) {
+                    icon.className = 'trace-icon completed';
+                    icon.textContent = '✕';
+                    status.textContent = '已拒绝';
+                    traceEl.dataset.traceStatus = 'rejected';
+                    traceEl.classList.remove('pending');
+                    traceEl.classList.add('completed');
+                } else {
+                    icon.className = 'trace-icon completed';
+                    icon.textContent = '✓';
+                    status.textContent = '已完成';
+                    traceEl.dataset.traceStatus = 'completed';
+                    traceEl.classList.remove('pending');
+                    traceEl.classList.add('completed');
+                }
+
+                outputContent.textContent = output || '(无输出)';
+
+                const matchedTraceId = traceEl.dataset.traceId || traceId;
+                if (matchedTraceId && pendingTraces[matchedTraceId]) {
+                    pendingTraces[matchedTraceId].output = output;
+                    pendingTraces[matchedTraceId].completed = !isApprovalPlaceholder && !isChoicePlaceholder;
+                    pendingTraces[matchedTraceId].status = traceEl.dataset.traceStatus;
+                }
+
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                return true;
+            };
+
+            if (traceId) {
+                const traceEl = document.querySelector(`[data-trace-id="${traceId}"]`);
+                if (applyTraceUpdate(traceEl)) {
+                    return;
+                }
+            }
         }
 
         function getUserInitials(userName) {
@@ -1606,7 +2093,7 @@
             pre.textContent = formatActivityTraces(merged, [], []);
         }
 
-        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = []) {
+        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = [], fromHistory = false) {
             clearTransientStatusMessages();
             const normalizedText = String(text || '').trim();
             const hiddenAssistantMessagePrefixes = [
@@ -1622,7 +2109,120 @@
                 messagesEl.appendChild(block);
             }
 
-            appendActivityTracesToBlock(block, activityTraces, toolCalls, loadedSkills);
+            // Create tool cards from tool_calls ONLY when loading history
+            // During real-time execution, SSE events create the cards
+            if (fromHistory && toolCalls && toolCalls.length > 0) {
+                toolCalls.forEach((toolCall) => {
+                    const name = String(toolCall.name || 'unknown');
+                    const input = String(toolCall.input || '');
+                    const output = String(toolCall.output || '');
+                    const traceId = String(toolCall.trace_id || toolCall.traceId || `history-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+                    const isApprovalPlaceholderHistory = output.startsWith('__APPROVAL_REQUIRED__');
+                    const isChoicePlaceholderHistory = output.startsWith('__CHOICE_REQUIRED__');
+                    const isRejectedByHumanHistory = output.trim() === 'rejected by human';
+
+                    let historyTraceStatus = 'completed';
+                    let historyIconClass = 'trace-icon completed';
+                    let historyIconText = '✓';
+                    let historyStatusText = '已完成';
+                    let historyCardStateClass = 'completed';
+
+                    if (isApprovalPlaceholderHistory) {
+                        historyTraceStatus = 'approval-pending';
+                        historyIconClass = 'trace-icon pending';
+                        historyIconText = '⏸';
+                        historyStatusText = '待批准';
+                        historyCardStateClass = 'pending';
+                    } else if (isChoicePlaceholderHistory) {
+                        historyTraceStatus = 'choice-pending';
+                        historyIconClass = 'trace-icon pending';
+                        historyIconText = '❓';
+                        historyStatusText = '待选择';
+                        historyCardStateClass = 'pending';
+                    } else if (isRejectedByHumanHistory) {
+                        historyTraceStatus = 'rejected';
+                        historyIconClass = 'trace-icon completed';
+                        historyIconText = '✕';
+                        historyStatusText = '已拒绝';
+                        historyCardStateClass = 'completed';
+                    }
+
+                    // Create tool card
+                    const traceEl = document.createElement('div');
+                    traceEl.className = 'realtime-trace rounded-xl border border-slate-200 bg-slate-50/80';
+                    traceEl.id = traceId;
+                    traceEl.dataset.traceId = traceId;
+                    traceEl.dataset.traceName = name;
+                    traceEl.dataset.traceStatus = historyTraceStatus;
+                    traceEl.classList.add(historyCardStateClass);
+
+                    const header = document.createElement('div');
+                    header.className = 'trace-header';
+
+                    const toggle = document.createElement('span');
+                    toggle.className = 'trace-toggle';
+                    toggle.textContent = '▶';
+
+                    const icon = document.createElement('span');
+                    icon.className = historyIconClass;
+                    icon.textContent = historyIconText;
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.className = 'trace-name';
+                    nameSpan.textContent = `${name}`;
+
+                    const status = document.createElement('span');
+                    status.className = 'trace-status';
+                    status.textContent = historyStatusText;
+
+                    header.appendChild(toggle);
+                    header.appendChild(icon);
+                    header.appendChild(nameSpan);
+                    header.appendChild(status);
+
+                    const content = document.createElement('div');
+                    content.className = 'trace-content';
+
+                    const inputDiv = document.createElement('div');
+                    inputDiv.className = 'trace-input';
+
+                    const inputLabel = document.createElement('div');
+                    inputLabel.className = 'trace-label';
+                    inputLabel.textContent = '📥 输入:';
+
+                    const inputContent = document.createElement('pre');
+                    inputContent.textContent = input || '(无输入)';
+
+                    inputDiv.appendChild(inputLabel);
+                    inputDiv.appendChild(inputContent);
+
+                    const outputDiv = document.createElement('div');
+                    outputDiv.className = 'trace-output';
+
+                    const outputLabel = document.createElement('div');
+                    outputLabel.className = 'trace-label';
+                    outputLabel.textContent = '📤 输出:';
+
+                    const outputContent = document.createElement('pre');
+                    outputContent.textContent = output || '(无输出)';
+
+                    outputDiv.appendChild(outputLabel);
+                    outputDiv.appendChild(outputContent);
+
+                    content.appendChild(inputDiv);
+                    content.appendChild(outputDiv);
+
+                    // Toggle expand/collapse on header click
+                    header.addEventListener('click', function () {
+                        const expanded = content.classList.toggle('expanded');
+                        toggle.classList.toggle('expanded', expanded);
+                    });
+
+                    traceEl.appendChild(header);
+                    traceEl.appendChild(content);
+                    block.appendChild(traceEl);
+                });
+            }
 
             if (!shouldHideText && normalizedText) {
                 const msg = document.createElement('div');
@@ -1685,6 +2285,30 @@
             async function submitApproval(approved) {
                 setBusy(true);
                 const approvedLabel = approved ? '已批准' : '已拒绝';
+
+                if (approved) {
+                    const approvalTraceEl = messagesEl.querySelector(`[data-approval-request-id="${requestId}"]`);
+                    if (approvalTraceEl) {
+                        const icon = approvalTraceEl.querySelector('.trace-icon');
+                        const status = approvalTraceEl.querySelector('.trace-status');
+                        if (icon) {
+                            icon.className = 'trace-icon running';
+                            icon.textContent = '⏳';
+                        }
+                        if (status) {
+                            status.textContent = '已批准（执行中）';
+                        }
+                        approvalTraceEl.dataset.traceStatus = 'approval-approved';
+                        approvalTraceEl.classList.remove('pending', 'completed');
+
+                        const traceId = String(approvalTraceEl.dataset.traceId || '').trim();
+                        if (traceId && pendingTraces[traceId]) {
+                            pendingTraces[traceId].status = 'approval-approved';
+                            pendingTraces[traceId].completed = false;
+                        }
+                    }
+                }
+
                 markRequestCompleted(requestId);
                 wrap.remove();
                 removeRequestCardsById('approval', requestId);
@@ -1692,6 +2316,10 @@
                 try {
                     const user_id = userIdEl.value.trim();
                     const session_id = currentSessionId;
+
+                    // Reconnect SSE before submitting approval to catch subsequent events
+                    connectEventSource(session_id);
+
                     const res = await fetch('/api/approvals/decide', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1702,11 +2330,13 @@
                         unmarkRequestCompleted(requestId);
                         addApprovalRequestCard(item);
                         addMsg('a', `审批处理失败: ${data.detail || 'unknown error'}`);
+                        disconnectEventSource();
                         setBusy(false);
                         return;
                     }
 
-                    addAssistantMsg(data.reply || '', data.tool_calls || [], [], []);
+                    // Add new assistant message with real tool calls (real outputs replace placeholders)
+                    addAssistantMsg(data.reply || '', data.tool_calls || [], data.loaded_skills || [], data.activity_traces || []);
 
                     // Show next approval if present
                     if (data.approval_request) {
@@ -1724,6 +2354,7 @@
                     unmarkRequestCompleted(requestId);
                     addApprovalRequestCard(item);
                     addMsg('a', `审批请求失败: ${err}`);
+                    disconnectEventSource();
                     setBusy(false);
                 }
             }
@@ -1796,6 +2427,33 @@
                 const choiceMessage = question
                     ? `针对问题【${question}】我的选择是：${finalChoice}`
                     : `我的选择是：${finalChoice}`;
+
+                const choiceTraceEl = messagesEl.querySelector(`[data-choice-request-id="${requestId}"]`);
+                if (choiceTraceEl) {
+                    const icon = choiceTraceEl.querySelector('.trace-icon');
+                    const status = choiceTraceEl.querySelector('.trace-status');
+                    const outputContent = choiceTraceEl.querySelector('.trace-output pre');
+                    if (icon) {
+                        icon.className = 'trace-icon completed';
+                        icon.textContent = '✓';
+                    }
+                    if (status) {
+                        status.textContent = '已选择';
+                    }
+                    if (outputContent) {
+                        outputContent.textContent = finalChoice ? `用户选择: ${finalChoice}` : '(无选择内容)';
+                    }
+                    choiceTraceEl.dataset.traceStatus = 'choice-selected';
+                    choiceTraceEl.classList.remove('pending');
+                    choiceTraceEl.classList.add('completed');
+                    const traceId = String(choiceTraceEl.dataset.traceId || '').trim();
+                    if (traceId && pendingTraces[traceId]) {
+                        pendingTraces[traceId].output = finalChoice ? `用户选择: ${finalChoice}` : '';
+                        pendingTraces[traceId].completed = true;
+                        pendingTraces[traceId].status = 'choice-selected';
+                    }
+                }
+
                 markRequestCompleted(requestId);
                 wrap.remove();
                 removeRequestCardsById('choice', requestId);
@@ -1804,6 +2462,7 @@
                 try {
                     const user_id = userIdEl.value.trim();
                     const session_id = currentSessionId;
+                    connectEventSource(session_id);
                     const res = await fetch('/api/choices/submit', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1847,6 +2506,7 @@
                     pendingChoiceMsgEl.remove();
                     addChoiceRequestCard(item);
                     addMsg('a', `提交选择失败: ${err}`);
+                    disconnectEventSource();
                     setBusy(false);
                 }
             }
@@ -1910,6 +2570,7 @@
 
         function clearMessages() {
             messagesEl.innerHTML = '';
+            pendingTraces = {};
         }
 
         function closeConversationMenus() {
@@ -2084,6 +2745,7 @@
                         item.tool_calls || [],
                         item.loaded_skills || [],
                         item.activity_traces || [],
+                        true  // fromHistory = true, so it creates tool cards
                     );
                 } else {
                     addMsg('u', item.content, false);
@@ -2092,6 +2754,7 @@
         }
 
         async function switchConversation(sessionId, title = '新对话') {
+            disconnectEventSource();
             currentSessionId = sessionId;
             loadCompletedRequestIds();
             currentTitleEl.textContent = title || '新对话';
@@ -2150,6 +2813,8 @@
             addMsg('u', message);
             textEl.value = '';
 
+            connectEventSource(session_id);
+
             try {
                 const res = await fetch('/api/chat', {
                     method: 'POST',
@@ -2160,6 +2825,7 @@
                 const data = await res.json();
                 if (!res.ok) {
                     addMsg('a', `错误: ${data.detail || '请求失败'}`);
+                    disconnectEventSource();
                     return;
                 }
 
@@ -2169,6 +2835,7 @@
                     data.loaded_skills || [],
                     data.activity_traces || [],
                 );
+
                 if (data.approval_request) {
                     addApprovalRequestCard(data.approval_request);
                 }
@@ -2180,8 +2847,10 @@
                 }
                 await loadConversations();
                 renderConversationList();
+
             } catch (err) {
                 addMsg('a', `网络错误: ${err}`);
+                disconnectEventSource();
             }
         });
 

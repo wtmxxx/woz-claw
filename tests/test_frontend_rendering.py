@@ -134,6 +134,50 @@ def test_frontend_tool_calls_have_visible_separator_between_items() -> None:
     assert "lines.push('--------------------');" in html
 
 
+def test_frontend_realtime_tool_traces_use_trace_ids() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "trace_id" in html
+    assert "data-trace-id" in html
+    assert "pendingTraces[traceId]" in html
+
+
+def test_frontend_approval_card_shows_approved_running_state() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "data-approval-request-id" in html
+    assert "已批准（执行中）" in html
+
+
+def test_frontend_approval_rejection_has_explicit_status() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "rejected by human" in html
+    assert "已拒绝" in html
+    assert "traceStatus = 'rejected'" in html
+
+
+def test_frontend_history_cards_mark_rejected_output_status() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "isRejectedByHumanHistory" in html
+    assert "historyStatusText = '已拒绝'" in html
+    assert "historyTraceStatus = 'rejected'" in html
+
+
+def test_frontend_choice_card_updates_to_selected_state() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "data-choice-request-id" in html
+    assert "已选择" in html
+    assert "用户选择:" in html
+
+
 def test_frontend_tool_trace_left_aligns_with_assistant_message() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")

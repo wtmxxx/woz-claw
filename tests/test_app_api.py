@@ -8,6 +8,7 @@ import yaml
 
 from wozclaw import app as app_module
 from wozclaw.memory_store import MemoryStore
+from wozclaw.service import ChatService
 
 
 def test_get_conversation_messages_accepts_numeric_message_id(monkeypatch) -> None:
@@ -169,13 +170,42 @@ def test_submit_choice_accepts_custom_input(monkeypatch, tmp_path: Path) -> None
     )
 
     captured: dict[str, str] = {}
+    replace_call: dict[str, str] = {}
 
-    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None, use_latest_session_memory: bool = False):
+    original_replace_choice_placeholder_output = app_module.memory_store.replace_choice_placeholder_output
+
+    def tracked_replace_choice_placeholder_output(
+        user_id: str,
+        session_id: str,
+        request_id: str,
+        output: str,
+    ) -> bool:
+        replace_call["user_id"] = user_id
+        replace_call["session_id"] = session_id
+        replace_call["request_id"] = request_id
+        replace_call["output"] = output
+        return original_replace_choice_placeholder_output(user_id, session_id, request_id, output)
+
+    monkeypatch.setattr(
+        app_module.memory_store,
+        "replace_choice_placeholder_output",
+        tracked_replace_choice_placeholder_output,
+    )
+
+    def fake_chat(
+        user_id: str,
+        session_id: str,
+        message: str,
+        llm_user_message: str | None = None,
+        use_latest_session_memory: bool = False,
+        push_event_func=None,
+    ):
         captured["user_id"] = user_id
         captured["session_id"] = session_id
         captured["message"] = message
         captured["llm_user_message"] = llm_user_message or ""
         captured["use_latest_session_memory"] = str(use_latest_session_memory)
+        captured["has_push_event_func"] = str(callable(push_event_func))
         return SimpleNamespace(
             reply="收到你的选择",
             memory_hits=0,
@@ -212,6 +242,11 @@ def test_submit_choice_accepts_custom_input(monkeypatch, tmp_path: Path) -> None
     assert "我想要图文并茂" in captured["message"]
     assert captured["llm_user_message"] == "针对问题【你更喜欢哪种输出】我的选择是：我想要图文并茂"
     assert captured["use_latest_session_memory"] == "True"
+    assert captured["has_push_event_func"] == "True"
+    assert replace_call["user_id"] == "u1"
+    assert replace_call["session_id"] == "s1"
+    assert replace_call["request_id"] == request_id
+    assert replace_call["output"] == "用户选择: 我想要图文并茂"
 
 
 def test_get_conversation_messages_returns_tool_calls(monkeypatch) -> None:
@@ -514,6 +549,93 @@ def test_get_pending_state_returns_approvals_and_choices(
     assert len(data["pending_choices"]) == 1
     assert data["pending_choices"][0]["question"] == "Which option?"
     assert data["pending_choices"][0]["request_id"] == choice["request_id"]
+
+
+def test_decide_approval_pushes_tool_event_before_resume(monkeypatch, tmp_path: Path) -> None:
+    memory_store = MemoryStore(root_dir=tmp_path)
+    approval = memory_store.create_pending_approval(
+        user_id="u-approve",
+        session_id="s-approve",
+        payload={
+            "command": "rm root/a.txt",
+            "operation": "delete",
+            "reason": "test approval",
+        },
+    )
+
+    chat_service = ChatService(memory_store=memory_store)
+    chat_service.remember_pending_approval_trace_id(
+        "u-approve",
+        "s-approve",
+        approval["request_id"],
+        "trace-123",
+    )
+
+    call_order: list[str] = []
+    pushed_events: list[dict[str, object]] = []
+
+    class FakeRuntimeAgent:
+        def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+            _ = memory_store
+            _ = user_id
+            _ = session_id
+
+        def run_bash_command_after_approval(self, command: str) -> str:
+            call_order.append(f"run:{command}")
+            return "approved output"
+
+    def fake_push_tool_trace_event(session_id: str, event: dict[str, object]) -> None:
+        call_order.append("push")
+        pushed_events.append({"session_id": session_id, **event})
+
+    def fake_resume_after_approval(**kwargs):
+        call_order.append("resume")
+        return SimpleNamespace(
+            reply="resumed reply",
+            memory_hits=0,
+            title="resumed title",
+            tool_calls=[
+                {
+                    "name": "bash_command",
+                    "input": "rm root/a.txt",
+                    "output": "approved output",
+                }
+            ],
+            loaded_skills=[],
+            activity_traces=[],
+            approval_request=None,
+            choice_request=None,
+        )
+
+    monkeypatch.setattr(app_module, "memory_store", memory_store)
+    monkeypatch.setattr(app_module, "chat_service", chat_service)
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "push_tool_trace_event",
+        fake_push_tool_trace_event,
+    )
+    monkeypatch.setattr(
+        app_module.chat_service,
+        "resume_after_approval",
+        fake_resume_after_approval,
+    )
+    monkeypatch.setattr("wozclaw.agent.ReActMemoryAgent", FakeRuntimeAgent)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/api/approvals/decide",
+        json={
+            "user_id": "u-approve",
+            "session_id": "s-approve",
+            "request_id": approval["request_id"],
+            "approved": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert call_order[:3] == ["run:rm root/a.txt", "push", "resume"]
+    assert pushed_events[0]["trace_id"] == "trace-123"
+    assert pushed_events[0]["output"] == "approved output"
 
 
 def test_get_pending_state_requires_user_id_and_session_id() -> None:

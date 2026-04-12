@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>俄罗斯方块游戏</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-gamepad"></i> 俄罗斯方块</h1>
+            <p class="subtitle">经典益智游戏 - Web版</p>
+        </header>
+        
+        <div class="game-area">
+            <div class="left-panel">
+                <div class="game-board">
+                    <canvas id="tetris" width="300" height="600"></canvas>
+                </div>
+                <div class="controls">
+                    <button id="startBtn" class="btn btn-primary">
+                        <i class="fas fa-play"></i> 开始游戏
+                    </button>
+                    <button id="pauseBtn" class="btn btn-secondary">
+                        <i class="fas fa-pause"></i> 暂停
+                    </button>
+                    <button id="resetBtn" class="btn btn-danger">
+                        <i class="fas fa-redo"></i> 重新开始
+                    </button>
+                </div>
+            </div>
+            
+            <div class="right-panel">
+                <div class="info-card">
+                    <h3><i class="fas fa-info-circle"></i> 游戏信息</h3>
+                    <div class="info-item">
+                        <span>分数:</span>
+                        <span id="score">0</span>
+                    </div>
+                    <div class="info-item">
+                        <span>等级:</span>
+                        <span id="level">1</span>
+                    </div>
+                    <div class="info-item">
+                        <span>已消除行数:</span>
+                        <span id="lines">0</span>
+                    </div>
+                    <div class="info-item">
+                        <span>下一个方块:</span>
+                        <div class="next-piece">
+                            <canvas id="nextPiece" width="120" height="120"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <h3><i class="fas fa-keyboard"></i> 操作说明</h3>
+                    <div class="controls-list">
+                        <div class="control-item">
+                            <span class="key">← →</span>
+                            <span>左右移动</span>
+                        </div>
+                        <div class="control-item">
+                            <span class="key">↑</span>
+                            <span>旋转</span>
+                        </div>
+                        <div class="control-item">
+                            <span class="key">↓</span>
+                            <span>加速下落</span>
+                        </div>
+                        <div class="control-item">
+                            <span class="key">空格</span>
+                            <span>直接落下</span>
+                        </div>
+                        <div class="control-item">
+                            <span class="key">P</span>
+                            <span>暂停/继续</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <h3><i class="fas fa-shapes"></i> 方块类型</h3>
+                    <div class="pieces-grid">
+                        <div class="piece-sample i-piece"></div>
+                        <div class="piece-sample j-piece"></div>
+                        <div class="piece-sample l-piece"></div>
+                        <div class="piece-sample o-piece"></div>
+                        <div class="piece-sample s-piece"></div>
+                        <div class="piece-sample t-piece"></div>
+                        <div class="piece-sample z-piece"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>使用 HTML5 Canvas 和 JavaScript 构建 | 按任意键开始游戏</p>
+        </footer>
+    </div>
+    
+    <script src="tetris.js"></script>
+</body>
+</html>
+EOF; __wozclaw_status=$?; printf "\n__WOZCLAW_CWD__%s\n" "$(pwd -P)"; exit $__wozclaw_status

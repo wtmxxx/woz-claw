@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import shutil
 import tempfile
@@ -90,10 +92,49 @@ def index() -> FileResponse:
     return FileResponse(static_dir / "index.html")
 
 
+@app.get("/api/chat/stream/{session_id}")
+async def stream_chat(user_id: str, session_id: str):
+    from fastapi.responses import StreamingResponse
+
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+        chat_service._tool_trace_queues[session_id] = queue
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30)
+                    if event is None:
+                        break
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'heartbeat'}, ensure_ascii=False)}\n\n"
+        except Exception:
+            pass
+        finally:
+            chat_service._tool_trace_queues.pop(session_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/chat")
 def chat_api(req: ChatRequest) -> dict[str, Any]:
     try:
-        result = chat_service.chat(req.user_id, req.session_id, req.message)
+        result = chat_service.chat(
+            req.user_id,
+            req.session_id,
+            req.message,
+            push_event_func=lambda event: chat_service.push_tool_trace_event(
+                req.session_id, event
+            ),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
@@ -140,7 +181,9 @@ def delete_conversation(user_id: str, session_id: str) -> dict[str, bool]:
 
 
 @app.patch("/api/conversations/{session_id}/title")
-def rename_conversation(session_id: str, req: RenameConversationRequest) -> dict[str, Any]:
+def rename_conversation(
+    session_id: str, req: RenameConversationRequest
+) -> dict[str, Any]:
     try:
         title = chat_service.rename_conversation(
             req.user_id,
@@ -153,7 +196,9 @@ def rename_conversation(session_id: str, req: RenameConversationRequest) -> dict
 
 
 @app.get("/api/conversations/{session_id}/messages")
-def get_conversation_messages(user_id: str, session_id: str) -> dict[str, list[dict[str, Any]]]:
+def get_conversation_messages(
+    user_id: str, session_id: str
+) -> dict[str, list[dict[str, Any]]]:
     try:
         rows = chat_service.get_session_messages(user_id, session_id)
     except ValueError as exc:
@@ -359,6 +404,24 @@ def decide_approval(req: ApprovalDecisionRequest) -> dict[str, Any]:
         output = runtime_agent.run_bash_command_after_approval(command)
     else:
         output = "rejected by human"
+
+    trace_id = chat_service.pop_pending_approval_trace_id(
+        user_text,
+        session_text,
+        request_text,
+    )
+    if trace_id:
+        chat_service.push_tool_trace_event(
+            session_text,
+            {
+                "type": "tool_called",
+                "session_id": session_text,
+                "trace_id": trace_id,
+                "name": "bash_command",
+                "output": output,
+            },
+        )
+
     result = chat_service.resume_after_approval(
         user_id=user_text,
         session_id=session_text,
@@ -405,13 +468,27 @@ def submit_choice(req: ChoiceDecisionRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="choice content is required")
 
-    choice_message = f"针对问题【{question}】我的选择是：{final_choice}" if question else f"我的选择是：{final_choice}"
+    choice_message = (
+        f"针对问题【{question}】我的选择是：{final_choice}"
+        if question
+        else f"我的选择是：{final_choice}"
+    )
+    memory_store.replace_choice_placeholder_output(
+        user_text,
+        session_text,
+        request_text,
+        f"用户选择: {final_choice}",
+    )
+
     result = chat_service.chat(
         user_text,
         session_text,
         choice_message,
         llm_user_message=choice_message,
         use_latest_session_memory=True,
+        push_event_func=lambda event: chat_service.push_tool_trace_event(
+            session_text, event
+        ),
     )
 
     return {
@@ -478,8 +555,9 @@ async def upload_skill_zip(
 
         skill_md_path = skill_md_candidates[0]
         skill_dir = skill_md_path.parent
-        skill_name = _read_skill_name(
-            skill_md_path) or _normalize_skill_zip_name(filename)
+        skill_name = _read_skill_name(skill_md_path) or _normalize_skill_zip_name(
+            filename
+        )
         if not skill_name:
             raise HTTPException(
                 status_code=400, detail="skill name is required")

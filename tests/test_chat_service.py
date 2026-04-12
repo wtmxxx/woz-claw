@@ -154,6 +154,71 @@ class DummyApprovalTraceAgent:
         )
 
 
+class FakeRuntimeTraceAgent:
+    def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+        _ = memory_store
+        _ = user_id
+        _ = session_id
+        self.recorded: list[tuple[str, str, str]] = []
+
+    def _stringify_tool_value(self, value) -> str:
+        return str(value)
+
+    def _record_tool_trace(self, name: str, input_value, output_value) -> None:
+        self.recorded.append((name, str(input_value), str(output_value)))
+
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
+        _ = memory_context
+        _ = session_memory
+        self._record_tool_trace("bash_command", "pwd", "/workdir")
+        self._record_tool_trace("search_session", "蓝莓", "#1 ...")
+        return AgentResponse(text=f"trace:{user_message}")
+
+
+class FakeApprovalRuntimeTraceAgent:
+    def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+        _ = memory_store
+        _ = user_id
+        _ = session_id
+
+    def _stringify_tool_value(self, value) -> str:
+        return str(value)
+
+    def _record_tool_trace(self, name: str, input_value, output_value) -> None:
+        _ = name
+        _ = input_value
+        _ = output_value
+
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
+        _ = memory_context
+        _ = session_memory
+        self._record_tool_trace(
+            "bash_command",
+            "rm root/a.txt",
+            "__APPROVAL_REQUIRED__{\"request_id\":\"ap-trace\",\"command\":\"rm root/a.txt\",\"operation\":\"delete\",\"reason\":\"operation delete policy\"}",
+        )
+        return AgentResponse(
+            text="检测到需要人工审批，已暂停执行并等待审批结果。",
+            tool_calls=[
+                {
+                    "name": "bash_command",
+                    "input": "rm root/a.txt",
+                    "output": "__APPROVAL_REQUIRED__{\"request_id\":\"ap-trace\",\"command\":\"rm root/a.txt\",\"operation\":\"delete\",\"reason\":\"operation delete policy\"}",
+                }
+            ],
+        )
+
+
 def test_chat_service_persists_messages_and_uses_context(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     store.remember_long_term("u1", "用户偏好中文输出", tags=["preference"])
@@ -508,6 +573,76 @@ def test_chat_service_filters_approval_placeholder_from_activity_traces(tmp_path
     result = service.chat(user_id="u23", session_id="s23", message="执行危险命令")
     assert result.approval_request is not None
     assert result.activity_traces == []
+
+
+def test_chat_service_emits_trace_ids_for_tool_events(monkeypatch, tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=None,
+        title_generator=DummyTitleGenerator(),
+    )
+    monkeypatch.setattr("wozclaw.service.ReActMemoryAgent",
+                        FakeRuntimeTraceAgent)
+
+    events: list[dict[str, object]] = []
+
+    service.chat(
+        user_id="u-trace",
+        session_id="s-trace",
+        message="trace me",
+        push_event_func=events.append,
+    )
+
+    tool_calling = [event for event in events if event.get(
+        "type") == "tool_calling"]
+    tool_called = [event for event in events if event.get(
+        "type") == "tool_called"]
+
+    assert len(tool_calling) == 2
+    assert len(tool_called) == 2
+
+    trace_ids = [str(event.get("trace_id", "")).strip()
+                 for event in tool_calling]
+    assert all(trace_ids)
+    assert len(set(trace_ids)) == 2
+    assert {str(event.get("trace_id", "")).strip()
+            for event in tool_called} == set(trace_ids)
+
+
+def test_chat_service_tracks_trace_id_for_approval_interrupt(monkeypatch, tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=None,
+        title_generator=DummyTitleGenerator(),
+    )
+    monkeypatch.setattr("wozclaw.service.ReActMemoryAgent",
+                        FakeApprovalRuntimeTraceAgent)
+
+    events: list[dict[str, object]] = []
+
+    result = service.chat(
+        user_id="u-approval-trace",
+        session_id="s-approval-trace",
+        message="审批命令",
+        push_event_func=events.append,
+    )
+
+    assert result.approval_request is not None
+    tool_called = [event for event in events if event.get(
+        "type") == "tool_called"]
+    assert len(tool_called) == 1
+    trace_id = str(tool_called[0].get("trace_id", "")).strip()
+    assert trace_id
+    assert (
+        service.pop_pending_approval_trace_id(
+            "u-approval-trace",
+            "s-approval-trace",
+            "ap-trace",
+        )
+        == trace_id
+    )
 
 
 def test_resume_after_approval_prefers_in_process_runtime_state(monkeypatch, tmp_path: Path) -> None:
