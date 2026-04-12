@@ -8,6 +8,8 @@
     "exec": "ask_human"
   },
   "allowed_paths": [],
-  "command_allowlist": [],
+  "command_allowlist": [
+    "ls"
+  ],
   "command_blocklist": []
 }

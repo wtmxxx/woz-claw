@@ -399,7 +399,23 @@ class ReActMemoryAgent:
         )
 
     def _build_toolkit(self) -> Toolkit:
-        toolkit = Toolkit()
+        toolkit = Toolkit(
+            agent_skill_instruction=(
+                "<SKILLS>\n"
+                "The agent skills are a collection of folders of instructions, scripts, and resources. "
+                "If you want to use a skill, you MUST read its SKILL.md file carefully first. "
+                "Some skills include multiple files (for example references/, assets/, or scripts/) in the same directory, "
+                "and you may read those files when needed.\n"
+                "</SKILLS>"
+            ),
+            agent_skill_template=(
+                "<SKILL>\n"
+                "<NAME>{name}</NAME>\n"
+                "<DESCRIPTION>{description}</DESCRIPTION>\n"
+                "<USAGE>Check \"{dir}/SKILL.md\" for how to use this skill.</USAGE>\n"
+                "</SKILL>"
+            ),
+        )
 
         def remember_note(note: str, tags: str = "preference,fact") -> ToolResponse:
             """Overwrite memory.md with the latest full-memory text. The input must be complete, not incremental."""
@@ -623,14 +639,20 @@ class ReActMemoryAgent:
     def _expand_bash_aliases(self, command: str) -> str:
         return command
 
-    def _root_work_dir(self) -> Path:
+    def _root_work_dir(self, as_bash: bool = False) -> Path | str:
         configured = self._configured_work_dir()
+        root_path: Path
         if configured is not None:
-            return configured
-        if self._bash_work_dir.exists() and self._bash_work_dir.is_dir():
-            return self._bash_work_dir
-        self._bash_work_dir = self._project_root_dir().resolve()
-        return self._bash_work_dir
+            root_path = configured
+        elif self._bash_work_dir.exists() and self._bash_work_dir.is_dir():
+            root_path = self._bash_work_dir
+        else:
+            self._bash_work_dir = self._project_root_dir().resolve()
+            root_path = self._bash_work_dir
+
+        if as_bash:
+            return self._to_bash_path(root_path)
+        return root_path
 
     def _extract_command_paths(self, command_name: str, args: list[str]) -> list[str]:
         if command_name in {"echo", "pwd"}:
@@ -719,7 +741,7 @@ class ReActMemoryAgent:
         work_dir.mkdir(parents=True, exist_ok=True)
 
         expanded_cmd = self._expand_bash_aliases(command)
-        work_dir_str = work_dir.resolve().as_posix()
+        work_dir_str = str(self._root_work_dir(as_bash=True))
         full_command = (
             f'cd "{work_dir_str}" && {expanded_cmd}; '
             '__wozclaw_status=$?; '
@@ -954,6 +976,13 @@ class ReActMemoryAgent:
                 continue
             try:
                 toolkit.register_agent_skill(str(skill_dir))
+                # Keep runtime registration path unchanged while rendering
+                # bash-style paths in the skills prompt.
+                skill_dir_text = str(skill_dir)
+                bash_dir_text = self._to_bash_path(skill_dir)
+                for skill_meta in toolkit.skills.values():
+                    if str(skill_meta.get("dir", "")) == skill_dir_text:
+                        skill_meta["dir"] = bash_dir_text
                 self._loaded_skills.append(
                     {
                         "name": item.get("name", ""),
@@ -1114,11 +1143,31 @@ class ReActMemoryAgent:
     def _project_root_dir(self) -> Path:
         return Path(__file__).resolve().parents[2]
 
-    def _wozclaw_dir(self) -> Path:
+    def _wozclaw_dir(self, as_bash: bool = False) -> Path | str:
         configured = self._configured_wozclaw_dir()
+        wozclaw_path: Path
         if configured is not None:
-            return configured
-        return self._project_root_dir() / ".wozclaw"
+            wozclaw_path = configured
+        else:
+            wozclaw_path = self._project_root_dir() / ".wozclaw"
+
+        if as_bash:
+            return self._to_bash_path(wozclaw_path)
+        return wozclaw_path
+
+    def _to_bash_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        posix_text = resolved.as_posix()
+
+        drive = resolved.drive
+        if not drive:
+            return posix_text
+
+        drive_letter = drive.rstrip(":").lower()
+        suffix = posix_text[2:].lstrip("/")
+        if suffix:
+            return f"/{drive_letter}/{suffix}"
+        return f"/{drive_letter}"
 
     def _record_tool_trace(self, name: str, input_value: Any, output_value: Any) -> None:
         item = {
@@ -1278,12 +1327,12 @@ class ReActMemoryAgent:
             "可使用分段读取进一步控制上下文规模。\n"
             "</BASH_POLICY>\n\n"
             "<PATHS>\n"
-            f"工作目录: {self._root_work_dir()}\n"
-            f"配置目录: {self._wozclaw_dir()}\n"
+            f"工作目录: {self._root_work_dir(as_bash=True)}\n"
+            f"配置目录: {self._wozclaw_dir(as_bash=True)}\n"
             "skills目录位于配置目录下。\n"
             "</PATHS>\n\n"
             f"<USER>当前用户ID: {self.user_id}</USER>\n\n"
-            f"<MEMORY>\n{memory_context}</MEMORY>"
+            f"<MEMORY>\n{memory_context}\n</MEMORY>"
         )
 
 

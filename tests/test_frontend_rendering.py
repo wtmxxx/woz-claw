@@ -198,6 +198,30 @@ def test_frontend_new_conversation_button_uses_dedicated_style_class() -> None:
     assert "color: #1f56d8;" in btn_block
 
 
+def test_frontend_new_conversation_button_is_vertically_centered() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    btn_start = html.index(".new-conv-btn {")
+    btn_end = html.index("}", btn_start)
+    btn_block = html[btn_start:btn_end]
+
+    assert "align-items: flex-start;" not in btn_block
+    assert "align-items:center;" in btn_block
+
+
+def test_frontend_new_conversation_button_content_is_horizontally_centered() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    btn_start = html.index(".new-conv-btn {")
+    btn_end = html.index("}", btn_start)
+    btn_block = html[btn_start:btn_end]
+
+    assert "justify-content: flex-start;" not in btn_block
+    assert "justify-content:center;" in btn_block
+
+
 def test_frontend_settings_button_is_semi_iconized() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")

@@ -426,6 +426,36 @@ def test_register_user_skills_calls_toolkit(monkeypatch, tmp_path) -> None:
     assert toolkit.registered == [str(skill_dir)]
 
 
+def test_toolkit_skill_prompt_uses_xml_and_bash_path(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(memory_store=store, user_id="u3", session_id="s3")
+
+    skill_dir = tmp_path / "skills-root" / "memory-tools"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: memory-tools\ndescription: test skill\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        agent,
+        "_resolve_enabled_skills",
+        lambda: [{"name": "memory-tools",
+                  "source": "global", "dir": str(skill_dir)}],
+    )
+
+    toolkit = agent._build_toolkit()
+    prompt = toolkit.get_agent_skill_prompt()
+
+    assert prompt is not None
+    assert "<SKILLS>" in prompt
+    assert "<SKILL>" in prompt
+    assert "# Agent Skills" not in prompt
+    assert "multiple files" in prompt
+    assert "references/" in prompt
+    assert "assets/" in prompt
+    assert f'{agent._to_bash_path(skill_dir)}/SKILL.md' in prompt
+
+
 def test_global_and_user_skills_are_merged(monkeypatch, tmp_path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     agent = ReActMemoryAgent(memory_store=store, user_id="u4", session_id="s4")
@@ -956,8 +986,12 @@ def test_memory_prompt_paths_includes_configured_dirs(monkeypatch, tmp_path) -> 
 
     prompt = agent.build_system_prompt("ctx")
 
-    assert str((project_root / "workdir").resolve()) in prompt
-    assert str((project_root / ".wozclaw").resolve()) in prompt
+    workdir = (project_root / "workdir").resolve()
+    wozclaw_dir = (project_root / ".wozclaw").resolve()
+
+    assert str(workdir) in prompt or agent._to_bash_path(workdir) in prompt
+    assert str(wozclaw_dir) in prompt or agent._to_bash_path(
+        wozclaw_dir) in prompt
 
 
 def test_bash_aliases_preserve_pipes_and_redirects(tmp_path) -> None:
