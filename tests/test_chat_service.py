@@ -219,6 +219,113 @@ class FakeApprovalRuntimeTraceAgent:
         )
 
 
+class FakeRuntimeTraceAgentWithAssistantText:
+    def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+        _ = memory_store
+        _ = user_id
+        _ = session_id
+        self.recorded: list[tuple[str, str, str]] = []
+        self._assistant_texts = ["我先查看当前目录。"]
+
+    def _stringify_tool_value(self, value) -> str:
+        return str(value)
+
+    def _record_tool_trace(self, name: str, input_value, output_value) -> None:
+        self.recorded.append((name, str(input_value), str(output_value)))
+
+    def consume_auto_assistant_texts(self) -> list[str]:
+        rows = list(self._assistant_texts)
+        self._assistant_texts = []
+        return rows
+
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
+        _ = memory_context
+        _ = session_memory
+        self._record_tool_trace("bash_command", "pwd", "/workdir")
+        return AgentResponse(text=f"trace:{user_message}")
+
+
+class FakeRuntimeTraceAgentWithThinking:
+    def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+        _ = memory_store
+        _ = user_id
+        _ = session_id
+        self.recorded: list[tuple[str, str, str]] = []
+        self._thinking_texts = ["我在检查当前目录和约束，准备调用工具。"]
+
+    def _stringify_tool_value(self, value) -> str:
+        return str(value)
+
+    def _record_tool_trace(self, name: str, input_value, output_value) -> None:
+        self.recorded.append((name, str(input_value), str(output_value)))
+
+    def consume_auto_thinking_texts(self) -> list[str]:
+        rows = list(self._thinking_texts)
+        self._thinking_texts = []
+        return rows
+
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
+        _ = memory_context
+        _ = session_memory
+        self._record_tool_trace("bash_command", "pwd", "/workdir")
+        return AgentResponse(text=f"trace:{user_message}")
+
+
+class FakeRuntimeTraceAgentWithInterleavedUiEvents:
+    def __init__(self, memory_store: MemoryStore, user_id: str, session_id: str) -> None:
+        _ = memory_store
+        _ = user_id
+        _ = session_id
+        self.recorded: list[tuple[str, str, str]] = []
+        self._thinking_batches = [
+            ["先检查路径约束"],
+            ["再确认命令输出"],
+        ]
+        self._assistant_batches = [
+            ["先看一下目录。"],
+            ["目录已确认。"],
+        ]
+
+    def _stringify_tool_value(self, value) -> str:
+        return str(value)
+
+    def _record_tool_trace(self, name: str, input_value, output_value) -> None:
+        self.recorded.append((name, str(input_value), str(output_value)))
+
+    def consume_auto_thinking_texts(self) -> list[str]:
+        if not self._thinking_batches:
+            return []
+        return self._thinking_batches.pop(0)
+
+    def consume_auto_assistant_texts(self) -> list[str]:
+        if not self._assistant_batches:
+            return []
+        return self._assistant_batches.pop(0)
+
+    def respond(
+        self,
+        user_message: str,
+        memory_context: str,
+        session_memory: str = "",
+    ) -> AgentResponse:
+        _ = user_message
+        _ = memory_context
+        _ = session_memory
+        self._record_tool_trace("bash_command", "pwd", "/workdir")
+        self._record_tool_trace("search_session", "蓝莓", "#1 ...")
+        return AgentResponse(text="最终回复")
+
+
 def test_chat_service_persists_messages_and_uses_context(tmp_path: Path) -> None:
     store = MemoryStore(root_dir=tmp_path)
     store.remember_long_term("u1", "用户偏好中文输出", tags=["preference"])
@@ -643,6 +750,155 @@ def test_chat_service_tracks_trace_id_for_approval_interrupt(monkeypatch, tmp_pa
         )
         == trace_id
     )
+
+
+def test_chat_service_buffers_tool_trace_events_before_stream_subscription(tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=DummyAgent(),
+        title_generator=DummyTitleGenerator(),
+    )
+
+    service.push_tool_trace_event(
+        "s-buffer",
+        {"type": "assistant_text", "text": "我先查看当前目录。"},
+    )
+    service.push_tool_trace_event(
+        "s-buffer",
+        {"type": "assistant_thinking", "text": "先判断路径是否可用。"},
+    )
+
+    buffered = service.consume_buffered_tool_trace_events("s-buffer")
+
+    assert len(buffered) == 2
+    assert buffered[0]["type"] == "assistant_text"
+    assert buffered[1]["type"] == "assistant_thinking"
+    assert service.consume_buffered_tool_trace_events("s-buffer") == []
+
+
+def test_chat_service_emits_assistant_text_event_before_tool_calling(monkeypatch, tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=None,
+        title_generator=DummyTitleGenerator(),
+    )
+    monkeypatch.setattr(
+        "wozclaw.service.ReActMemoryAgent",
+        FakeRuntimeTraceAgentWithAssistantText,
+    )
+
+    events: list[dict[str, object]] = []
+
+    service.chat(
+        user_id="u-assistant-text",
+        session_id="s-assistant-text",
+        message="查一下目录",
+        push_event_func=events.append,
+    )
+
+    assistant_events = [
+        event for event in events if event.get("type") == "assistant_text"
+    ]
+    tool_calling_events = [
+        event for event in events if event.get("type") == "tool_calling"
+    ]
+
+    assert len(assistant_events) == 1
+    assert assistant_events[0].get("text") == "我先查看当前目录。"
+    assert len(tool_calling_events) == 1
+    assert events.index(assistant_events[0]) < events.index(
+        tool_calling_events[0])
+
+    messages = service.get_session_messages(
+        "u-assistant-text", "s-assistant-text")
+    assistant_rows = [
+        row for row in messages if row.get("role") == "assistant"]
+    assert assistant_rows
+    meta = assistant_rows[-1].get("meta") or {}
+    assert meta.get("ui_assistant_texts") == ["我先查看当前目录。"]
+
+
+def test_chat_service_emits_thinking_event_before_tool_calling(monkeypatch, tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=None,
+        title_generator=DummyTitleGenerator(),
+    )
+    monkeypatch.setattr(
+        "wozclaw.service.ReActMemoryAgent",
+        FakeRuntimeTraceAgentWithThinking,
+    )
+
+    events: list[dict[str, object]] = []
+
+    service.chat(
+        user_id="u-thinking",
+        session_id="s-thinking",
+        message="查一下目录",
+        push_event_func=events.append,
+    )
+
+    thinking_events = [
+        event for event in events if event.get("type") == "assistant_thinking"
+    ]
+    tool_calling_events = [
+        event for event in events if event.get("type") == "tool_calling"
+    ]
+
+    assert len(thinking_events) == 1
+    assert thinking_events[0].get("text") == "我在检查当前目录和约束，准备调用工具。"
+    assert len(tool_calling_events) == 1
+    assert events.index(thinking_events[0]) < events.index(
+        tool_calling_events[0])
+
+    state = store.get_session_state("u-thinking", "s-thinking")
+    session_memory = str(state.get("session_memory", ""))
+    assert "我在检查当前目录和约束，准备调用工具。" not in session_memory
+
+    messages = service.get_session_messages("u-thinking", "s-thinking")
+    assistant_rows = [
+        row for row in messages if row.get("role") == "assistant"]
+    assert assistant_rows
+    meta = assistant_rows[-1].get("meta") or {}
+    assert meta.get("ui_thinking_texts") == ["我在检查当前目录和约束，准备调用工具。"]
+
+
+def test_chat_service_persists_ui_timeline_events_in_time_order(monkeypatch, tmp_path: Path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    service = ChatService(
+        memory_store=store,
+        agent=None,
+        title_generator=DummyTitleGenerator(),
+    )
+    monkeypatch.setattr(
+        "wozclaw.service.ReActMemoryAgent",
+        FakeRuntimeTraceAgentWithInterleavedUiEvents,
+    )
+
+    service.chat(
+        user_id="u-timeline",
+        session_id="s-timeline",
+        message="按顺序展示",
+    )
+
+    messages = service.get_session_messages("u-timeline", "s-timeline")
+    assistant_rows = [
+        row for row in messages if row.get("role") == "assistant"]
+    assert assistant_rows
+    meta = assistant_rows[-1].get("meta") or {}
+    timeline = meta.get("ui_timeline_events")
+    assert isinstance(timeline, list)
+    assert [str(item.get("type", "")) for item in timeline] == [
+        "assistant_thinking",
+        "assistant_text",
+        "tool",
+        "assistant_thinking",
+        "assistant_text",
+        "tool",
+    ]
 
 
 def test_resume_after_approval_prefers_in_process_runtime_state(monkeypatch, tmp_path: Path) -> None:

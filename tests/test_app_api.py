@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
@@ -43,11 +44,20 @@ def test_get_conversation_messages_accepts_numeric_message_id(monkeypatch) -> No
 def test_chat_api_returns_tool_calls(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
+    def fake_chat(
+        user_id: str,
+        session_id: str,
+        message: str,
+        llm_user_message: str | None = None,
+        push_event_func=None,
+        **kwargs,
+    ):
         _ = user_id
         _ = session_id
         _ = message
         _ = llm_user_message
+        _ = push_event_func
+        _ = kwargs
         return SimpleNamespace(
             reply="ok",
             memory_hits=1,
@@ -86,11 +96,20 @@ def test_chat_api_returns_tool_calls(monkeypatch) -> None:
 def test_chat_api_returns_approval_request(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
+    def fake_chat(
+        user_id: str,
+        session_id: str,
+        message: str,
+        llm_user_message: str | None = None,
+        push_event_func=None,
+        **kwargs,
+    ):
         _ = user_id
         _ = session_id
         _ = message
         _ = llm_user_message
+        _ = push_event_func
+        _ = kwargs
         return SimpleNamespace(
             reply="等待审批",
             memory_hits=0,
@@ -120,14 +139,63 @@ def test_chat_api_returns_approval_request(monkeypatch) -> None:
     assert payload["approval_request"]["request_id"] == "abc123"
 
 
+def test_stream_chat_replays_buffered_events(monkeypatch, tmp_path: Path) -> None:
+    app_module.memory_store = MemoryStore(root_dir=tmp_path)
+    app_module.chat_service = ChatService(memory_store=app_module.memory_store)
+    client = TestClient(app_module.app)
+
+    async def _return_none(awaitable, *args, **kwargs):
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        return None
+
+    monkeypatch.setattr(app_module.asyncio, "wait_for", _return_none)
+
+    app_module.chat_service.push_tool_trace_event(
+        "s-buffer",
+        {
+            "type": "assistant_text",
+            "session_id": "s-buffer",
+            "text": "我先查看当前目录。",
+        },
+    )
+
+    with client.stream("GET", "/api/chat/stream/s-buffer", params={"user_id": "u1"}) as response:
+        assert response.status_code == 200
+        events: list[str] = []
+        for line in response.iter_lines():
+            if isinstance(line, bytes):
+                text_line = line.decode("utf-8")
+            else:
+                text_line = str(line)
+            if text_line.startswith("data: "):
+                events.append(text_line[6:])
+                break
+
+    assert events
+    payload = json.loads(events[0])
+    assert payload["type"] == "assistant_text"
+    assert payload["text"] == "我先查看当前目录。"
+
+
 def test_chat_api_returns_choice_request(monkeypatch) -> None:
     client = TestClient(app_module.app)
 
-    def fake_chat(user_id: str, session_id: str, message: str, llm_user_message: str | None = None):
+    def fake_chat(
+        user_id: str,
+        session_id: str,
+        message: str,
+        llm_user_message: str | None = None,
+        push_event_func=None,
+        **kwargs,
+    ):
         _ = user_id
         _ = session_id
         _ = message
         _ = llm_user_message
+        _ = push_event_func
+        _ = kwargs
         return SimpleNamespace(
             reply="我有点拿不准",
             memory_hits=0,
@@ -580,8 +648,9 @@ def test_decide_approval_pushes_tool_event_before_resume(monkeypatch, tmp_path: 
             _ = user_id
             _ = session_id
 
-        def run_bash_command_after_approval(self, command: str) -> str:
+        def run_bash_command_after_approval(self, command: str, background: bool = False) -> str:
             call_order.append(f"run:{command}")
+            _ = background
             return "approved output"
 
     def fake_push_tool_trace_event(session_id: str, event: dict[str, object]) -> None:

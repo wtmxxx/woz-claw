@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentscope.agent import ReActAgent
-from agentscope.formatter import OpenAIChatFormatter
+from agentscope.formatter import DeepSeekChatFormatter, OpenAIChatFormatter
 from agentscope.message import Msg
 from agentscope.model import OpenAIChatModel
 from agentscope.tool import ToolResponse, Toolkit
@@ -68,6 +68,8 @@ class LLMDialogueRecorder:
         self._compact_model = compact_model
         self._compact_threshold_tokens = max(1, int(compact_threshold_tokens))
         self._auto_tool_traces: list[dict[str, str]] = []
+        self._auto_assistant_texts: list[str] = []
+        self._auto_thinking_texts: list[str] = []
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to wrapped model."""
@@ -80,8 +82,12 @@ class LLMDialogueRecorder:
         response = await self._model(filtered_prompt, **kwargs)
         try:
             self._node_counter += 1
+            thinking_text = self._extract_thinking_text(response)
+            if thinking_text:
+                self._auto_thinking_texts.append(thinking_text)
             assistant_text = self._extract_assistant_text(response)
             if assistant_text:
+                self._auto_assistant_texts.append(assistant_text)
                 self._memory_store.append_session_memory_message(
                     self._user_id,
                     self._session_id,
@@ -209,14 +215,38 @@ class LLMDialogueRecorder:
         self._auto_tool_traces = []
         return rows
 
-    async def _compact_session_memory(self, session_memory: str) -> str:
-        prompt = (
+    def consume_auto_assistant_texts(self) -> list[str]:
+        rows = [str(item).strip()
+                for item in self._auto_assistant_texts if str(item).strip()]
+        self._auto_assistant_texts = []
+        return rows
+
+    def consume_auto_thinking_texts(self) -> list[str]:
+        rows = [
+            str(item).strip()
+            for item in self._auto_thinking_texts
+            if str(item).strip()
+        ]
+        self._auto_thinking_texts = []
+        return rows
+
+    def _build_compact_session_memory_prompt(self, session_memory: str) -> str:
+        recent_tail = self._render_recent_session_messages()
+        return (
             "请将下面的会话记忆压缩为高密度摘要。\n"
             f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
             "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
-            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n\n"
+            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n"
+            "最后必须单独追加一行‘最新任务状态：...’。\n"
+            "判断最新任务时，优先参考最近会话尾部，而不是旧摘要里较早的任务。\n"
+            "如果最近用户请求是压缩上下文、compact_context、上下文压缩或整理记忆，最后一行必须写‘最新任务状态：上下文压缩已完成，目前无任务’。\n"
+            "如果没有明确未完成任务，写‘最新任务状态：无明确未完成任务’。\n\n"
+            f"最近会话尾部：\n{recent_tail}\n\n"
             f"原始会话记忆：\n{session_memory}"
         )
+
+    async def _compact_session_memory(self, session_memory: str) -> str:
+        prompt = self._build_compact_session_memory_prompt(session_memory)
         response = await self._compact_model(
             [
                 {
@@ -233,31 +263,40 @@ class LLMDialogueRecorder:
         )
         return self._extract_assistant_text(response)
 
+    def _render_recent_session_messages(self, rounds: int = 6) -> str:
+        try:
+            messages = self._memory_store.get_recent_session_messages(
+                self._user_id,
+                self._session_id,
+                rounds=max(1, int(rounds)),
+            )
+        except Exception:
+            messages = []
+        if not messages:
+            return "(无最近会话消息)"
+
+        lines: list[str] = []
+        for msg in messages:
+            role = str(msg.get("role", ""))
+            content = str(msg.get("content", "")).strip()
+            if not content:
+                continue
+            if role == "user":
+                prefix = "user"
+            elif role == "assistant":
+                prefix = "assistant"
+            else:
+                prefix = role or "message"
+            lines.append(f"{prefix}: {content}")
+        if not lines:
+            return "(无最近会话消息)"
+        return "\n".join(lines)
+
     def _estimate_text_tokens(self, text: str) -> int:
         content = str(text or "")
         chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", content))
         other_chars = max(0, len(content) - chinese_chars)
         return max(1, chinese_chars + ((other_chars + 3) // 4))
-
-    def _tool_content_to_text(self, content: Any) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            chunks: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text_value = item.get("text") if item.get(
-                        "type") == "text" else item.get("content", "")
-                    if text_value:
-                        chunks.append(str(text_value))
-                    continue
-                text_attr = getattr(item, "text", "")
-                if text_attr:
-                    chunks.append(str(text_attr))
-            return "\n".join(chunks).strip()
-        return str(content).strip()
 
     def _message_field(self, msg: Any, field: str) -> Any:
         if isinstance(msg, dict):
@@ -285,6 +324,31 @@ class LLMDialogueRecorder:
             text_attr = getattr(block, "text", "")
             if text_attr:
                 chunks.append(str(text_attr))
+
+        return "\n".join(chunks).strip()
+
+    def _extract_thinking_text(self, value: Any) -> str:
+        content = getattr(value, "content", None)
+        if not isinstance(content, list):
+            return ""
+
+        chunks: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = str(block.get("type", "")).strip().lower()
+                if block_type in {"thinking", "reasoning"}:
+                    text_value = block.get("thinking") or block.get(
+                        "text") or block.get("content", "")
+                    if text_value:
+                        chunks.append(str(text_value))
+                continue
+
+            block_type = str(getattr(block, "type", "")).strip().lower()
+            if block_type in {"thinking", "reasoning"}:
+                thinking_text = getattr(block, "thinking", "") or getattr(
+                    block, "text", "") or getattr(block, "content", "")
+                if thinking_text:
+                    chunks.append(str(thinking_text))
 
         return "\n".join(chunks).strip()
 
@@ -353,7 +417,10 @@ class ReActMemoryAgent:
             temperature=0.2,
             compact_model_name=llm_config.compact_model,
         )
-        formatter = OpenAIChatFormatter()
+        formatter = self._build_formatter(
+            model_name=llm_config.model,
+            base_url=llm_config.base_url,
+        )
         toolkit = self._build_toolkit()
         self._agent = ReActAgent(
             name="memory-assistant",
@@ -375,7 +442,7 @@ class ReActMemoryAgent:
     ) -> AgentResponse:
         if self._agent is None:
             return AgentResponse(
-                text=self._fallback.respond(user_message, memory_context),
+                text="LLM 未配置，请在 config/llm.yaml 中设置 api_key 后重试。",
                 tool_calls=[],
                 loaded_skills=[],
                 activity_traces=[],
@@ -399,6 +466,8 @@ class ReActMemoryAgent:
         ]
         self._set_runtime_prompt(prompt)
         self._discard_stale_auto_tool_traces()
+        self._discard_stale_auto_assistant_texts()
+        self._discard_stale_auto_thinking_texts()
         self._approval_interrupt_requested = False
         self._approval_interrupt_message = "检测到需要人工审批，已暂停执行并等待审批结果。"
         self._choice_interrupt_requested = False
@@ -433,13 +502,18 @@ class ReActMemoryAgent:
                 loaded_skills=list(self._loaded_skills),
                 activity_traces=list(self._active_activity_traces),
             )
-        except Exception:
+        except Exception as exc:
             self._merge_auto_tool_traces_into_runtime_traces()
-            return AgentResponse(text=self._fallback.respond(user_message, memory_context), tool_calls=[])
+            return AgentResponse(
+                text=f"LLM 调用失败：{type(exc).__name__}: {exc}",
+                tool_calls=list(self._active_tool_traces),
+                loaded_skills=list(self._loaded_skills),
+                activity_traces=list(self._active_activity_traces),
+            )
 
         reply_text = self._msg_to_text(reply_msg)
         if not reply_text:
-            reply_text = self._fallback.respond(user_message, memory_context)
+            reply_text = "LLM 返回空内容，请重试。"
 
         self._merge_auto_tool_traces_into_runtime_traces()
 
@@ -490,6 +564,13 @@ class ReActMemoryAgent:
         self._dialogue_recorder = recorder
         return recorder
 
+    def _build_formatter(self, model_name: str, base_url: str) -> Any:
+        model_text = str(model_name or "").strip().lower()
+        base_url_text = str(base_url or "").strip().lower()
+        if "deepseek" in model_text or "deepseek" in base_url_text:
+            return DeepSeekChatFormatter()
+        return OpenAIChatFormatter()
+
     def _discard_stale_auto_tool_traces(self) -> None:
         recorder = self._dialogue_recorder
         if recorder is None:
@@ -501,6 +582,60 @@ class ReActMemoryAgent:
             consume()
         except Exception:
             return
+
+    def _discard_stale_auto_assistant_texts(self) -> None:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return
+        consume = getattr(recorder, "consume_auto_assistant_texts", None)
+        if not callable(consume):
+            return
+        try:
+            consume()
+        except Exception:
+            return
+
+    def _discard_stale_auto_thinking_texts(self) -> None:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return
+        consume = getattr(recorder, "consume_auto_thinking_texts", None)
+        if not callable(consume):
+            return
+        try:
+            consume()
+        except Exception:
+            return
+
+    def consume_auto_assistant_texts(self) -> list[str]:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return []
+        consume = getattr(recorder, "consume_auto_assistant_texts", None)
+        if not callable(consume):
+            return []
+        try:
+            rows = consume()
+        except Exception:
+            return []
+        if not isinstance(rows, list):
+            return []
+        return [str(item).strip() for item in rows if str(item).strip()]
+
+    def consume_auto_thinking_texts(self) -> list[str]:
+        recorder = self._dialogue_recorder
+        if recorder is None:
+            return []
+        consume = getattr(recorder, "consume_auto_thinking_texts", None)
+        if not callable(consume):
+            return []
+        try:
+            rows = consume()
+        except Exception:
+            return []
+        if not isinstance(rows, list):
+            return []
+        return [str(item).strip() for item in rows if str(item).strip()]
 
     def _merge_auto_tool_traces_into_runtime_traces(self) -> None:
         recorder = self._dialogue_recorder
@@ -659,6 +794,141 @@ class ReActMemoryAgent:
             self._record_tool_trace("search_daily", input_payload, output)
             return self._to_tool_response(output)
 
+        def list_dir(path: str = ".") -> ToolResponse:
+            """List files and folders under workdir-relative path."""
+            input_payload = {"path": path}
+            try:
+                output = self._list_directory(path)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("list_dir", input_payload, output)
+            return self._to_tool_response(output)
+
+        def file_exists(path: str) -> ToolResponse:
+            """Check whether a file or directory exists under workdir."""
+            input_payload = {"path": path}
+            try:
+                output = self._file_exists(path)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("file_exists", input_payload, output)
+            return self._to_tool_response(output)
+
+        def read_file(path: str, start_line: int = 1, end_line: int = 200) -> ToolResponse:
+            """Read text file content under workdir by line range (inclusive)."""
+            input_payload = {
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+            }
+            try:
+                output = self._read_text_file(path, start_line, end_line)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("read_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def write_file(path: str, content: str) -> ToolResponse:
+            """Write full UTF-8 text content to a file under workdir."""
+            input_payload = {"path": path, "content": content}
+            try:
+                output = self._write_text_file(path, content)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("write_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def append_file(path: str, content: str) -> ToolResponse:
+            """Append UTF-8 text content to a file under workdir."""
+            input_payload = {"path": path, "content": content}
+            try:
+                output = self._append_text_file(path, content)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("append_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def delete_file(path: str) -> ToolResponse:
+            """Delete a file under workdir or .wozclaw."""
+            input_payload = {"path": path}
+            try:
+                output = self._delete_file(path)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("delete_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def patch_file(path: str, patch_content: str) -> ToolResponse:
+            """Apply unified diff patch to a file. patch_content should be in unified diff format.
+            Example patch:
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,3 +1,3 @@
+             line1
+            -line2 old
+            +line2 new
+             line3
+            """
+            input_payload = {"path": path, "patch_content": patch_content}
+            try:
+                output = self._patch_text_file(path, patch_content)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("patch_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def search_file(path: str, pattern: str, limit: int = 50) -> ToolResponse:
+            """Search for lines matching a pattern in a file (supports regex). Returns matching lines with line numbers."""
+            input_payload = {"path": path, "pattern": pattern, "limit": limit}
+            try:
+                output = self._search_in_file(path, pattern, limit=limit)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("search_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def copy_file(src: str, dst: str) -> ToolResponse:
+            """Copy a file from src to dst. Both paths must be readable (src) and writable (dst) locations."""
+            input_payload = {"src": src, "dst": dst}
+            try:
+                output = self._copy_file(src, dst)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("copy_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def move_file(src: str, dst: str) -> ToolResponse:
+            """Move or rename a file from src to dst. Both must be within allowed write directories."""
+            input_payload = {"src": src, "dst": dst}
+            try:
+                output = self._move_file(src, dst)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace("move_file", input_payload, output)
+            return self._to_tool_response(output)
+
+        def replace_file_lines(path: str, start_line: int, end_line: int, content: str) -> ToolResponse:
+            """Replace file content in the specified line range (1-based, inclusive).
+
+            Examples:
+            - replace_file_lines("script.py", 10, 15, "new line 1\\nnew line 2")
+              Replaces lines 10-15 with the new content
+            - replace_file_lines("config.py", 5, 5, "DEBUG = False")
+              Replaces only line 5
+            - replace_file_lines("data.txt", 1, 100, "new content")
+              Replaces first 100 lines with new content
+            """
+            input_payload = {"path": path, "start_line": start_line,
+                             "end_line": end_line, "content": content}
+            try:
+                output = self._replace_file_lines(
+                    path, start_line, end_line, content)
+            except Exception as exc:  # pragma: no cover
+                output = f"error: {exc}"
+            self._record_tool_trace(
+                "replace_file_lines", input_payload, output)
+            return self._to_tool_response(output)
+
         def get_daily_window(message_id: int, before: int = 0, after: int = 0, day: str = "") -> ToolResponse:
             """Fetch daily messages around a message_id anchor. Use after search_daily to expand context."""
             input_payload = {
@@ -687,11 +957,11 @@ class ReActMemoryAgent:
             self._record_tool_trace("get_daily_window", input_payload, output)
             return self._to_tool_response(output)
 
-        def bash_command(command: str) -> ToolResponse:
+        def bash_command(command: str, background: bool = False) -> ToolResponse:
             """Run a policy-guarded bash command in the tracked current working directory."""
-            input_payload = {"command": command}
+            input_payload = {"command": command, "background": background}
             try:
-                output = self._run_bash_command(command)
+                output = self._run_bash_command(command, background=background)
             except Exception as exc:  # pragma: no cover
                 output = f"error: {exc}"
             self._record_tool_trace(
@@ -759,6 +1029,17 @@ class ReActMemoryAgent:
         toolkit.register_tool_function(get_session_window)
         toolkit.register_tool_function(search_daily)
         toolkit.register_tool_function(get_daily_window)
+        toolkit.register_tool_function(list_dir)
+        toolkit.register_tool_function(file_exists)
+        toolkit.register_tool_function(read_file)
+        toolkit.register_tool_function(write_file)
+        toolkit.register_tool_function(append_file)
+        toolkit.register_tool_function(delete_file)
+        toolkit.register_tool_function(patch_file)
+        toolkit.register_tool_function(search_file)
+        toolkit.register_tool_function(copy_file)
+        toolkit.register_tool_function(move_file)
+        toolkit.register_tool_function(replace_file_lines)
         toolkit.register_tool_function(bash_command)
         toolkit.register_tool_function(ask_human_choice)
         toolkit.register_tool_function(compact_context)
@@ -833,14 +1114,27 @@ class ReActMemoryAgent:
     def _path_config_file(self) -> Path:
         return (self._project_root_dir() / "config" / "path.yaml").resolve()
 
-    def _run_bash_command(self, command: str) -> str:
-        return self._run_bash_command_internal(command, skip_approval=False)
+    def _run_bash_command(self, command: str, background: bool = False) -> str:
+        return self._run_bash_command_internal(
+            command,
+            skip_approval=False,
+            background=background,
+        )
 
-    def run_bash_command_after_approval(self, command: str) -> str:
+    def run_bash_command_after_approval(self, command: str, background: bool = False) -> str:
         """Execute a previously approved command without re-entering approval gate."""
-        return self._run_bash_command_internal(command, skip_approval=True)
+        return self._run_bash_command_internal(
+            command,
+            skip_approval=True,
+            background=background,
+        )
 
-    def _run_bash_command_internal(self, command: str, skip_approval: bool = False) -> str:
+    def _run_bash_command_internal(
+        self,
+        command: str,
+        skip_approval: bool = False,
+        background: bool = False,
+    ) -> str:
         ok, reason = self._validate_bash_command(command)
         if not ok:
             return (
@@ -860,6 +1154,7 @@ class ReActMemoryAgent:
                     {
                         "type": "bash_command",
                         "command": command,
+                        "background": bool(background),
                         "operation": str(decision.get("operation", "unknown")),
                         "reason": str(decision.get("reason", "requires human approval")),
                     },
@@ -867,6 +1162,7 @@ class ReActMemoryAgent:
                 payload = {
                     "request_id": approval.get("request_id", ""),
                     "command": command,
+                    "background": bool(background),
                     "operation": str(decision.get("operation", "unknown")),
                     "reason": str(decision.get("reason", "requires human approval")),
                 }
@@ -877,15 +1173,42 @@ class ReActMemoryAgent:
 
         expanded_cmd = self._expand_bash_aliases(command)
         work_dir_str = str(self._root_work_dir(as_bash=False))
+        base_command = f'cd "{work_dir_str}" && {expanded_cmd}'
+
+        if background:
+            cmd = ["bash", "-lc", base_command]
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=work_dir,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    shell=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    start_new_session=True,
+                )
+            except Exception as exc:
+                return f"error: {exc}"
+
+            payload = {
+                "pid": getattr(process, "pid", 0),
+                "command": command,
+                "background": True,
+            }
+            return "__BACKGROUND_STARTED__" + json.dumps(payload, ensure_ascii=False)
+
         full_command = (
-            f'cd "{work_dir_str}" && {expanded_cmd}; '
+            f"{base_command}; "
             '__wozclaw_status=$?; '
-            'printf "\\n__WOZCLAW_CWD__%s\\n" "$(pwd -P)"; '
+            'printf "\n__WOZCLAW_CWD__%s\n" "$(pwd -P)"; '
             'exit $__wozclaw_status'
         )
 
         cmd = ["bash", "-lc", full_command]
-        timeout_seconds = 60
+        timeout_seconds = 30
         try:
             result = subprocess.run(
                 cmd,
@@ -1102,6 +1425,348 @@ class ReActMemoryAgent:
     def _rewrite_output_paths(self, output: str, work_dir: Path) -> str:
         _ = work_dir
         return output
+
+    def _resolve_read_file_path(self, raw_path: str, allow_missing: bool = False) -> Path | None:
+        """Resolve file path for read operations - no restrictions on path location."""
+        text = str(raw_path or "").strip()
+        if not text:
+            text = "."
+
+        try:
+            candidate = Path(text)
+            resolved = candidate.resolve(strict=False)
+        except Exception:
+            return None
+
+        if not allow_missing and not resolved.exists():
+            return None
+        return resolved
+
+    def _resolve_write_file_path(self, raw_path: str, allow_missing: bool = False) -> Path | None:
+        """Resolve file path for write operations - restricted to .wozclaw and workdir."""
+        text = str(raw_path or "").strip()
+        if not text:
+            text = "."
+
+        work_root = self._root_work_dir().resolve()
+        wozclaw_root = self._wozclaw_dir()
+        if isinstance(wozclaw_root, str):
+            wozclaw_root = Path(wozclaw_root)
+        wozclaw_root = wozclaw_root.resolve()
+
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            candidate = work_root / candidate
+
+        try:
+            resolved = candidate.resolve(strict=False)
+        except Exception:
+            return None
+
+        # Allow paths under workdir or .wozclaw
+        is_under_workdir = self._is_path_under(resolved, work_root)
+        is_under_wozclaw = self._is_path_under(resolved, wozclaw_root)
+
+        if not (is_under_workdir or is_under_wozclaw):
+            return None
+
+        if not allow_missing and not resolved.exists():
+            return None
+        return resolved
+
+    def _resolve_file_tool_path(self, raw_path: str, allow_missing: bool = False) -> Path | None:
+        """Deprecated: Use _resolve_read_file_path or _resolve_write_file_path instead."""
+        return self._resolve_write_file_path(raw_path, allow_missing)
+
+    def _list_directory(self, path: str = ".") -> str:
+        target = self._resolve_read_file_path(path)
+        if target is None:
+            return "error: path does not exist"
+        if not target.exists():
+            return "error: path does not exist"
+        if not target.is_dir():
+            return "error: target is not a directory"
+
+        rows: list[str] = []
+        for child in sorted(target.iterdir(), key=lambda item: item.name.lower()):
+            suffix = "/" if child.is_dir() else ""
+            rows.append(f"{child.name}{suffix}")
+            if len(rows) >= 500:
+                break
+        return "\n".join(rows) if rows else "(empty)"
+
+    def _file_exists(self, path: str) -> str:
+        target = self._resolve_read_file_path(path, allow_missing=True)
+        if target is None:
+            return "error: invalid path"
+        if not target.exists():
+            return "exists=false"
+        kind = "dir" if target.is_dir() else "file"
+        return f"exists=true type={kind}"
+
+    def _read_text_file(self, path: str, start_line: int = 1, end_line: int = 200) -> str:
+        target = self._resolve_read_file_path(path)
+        if target is None:
+            return "error: file not found"
+        if not target.is_file():
+            return "error: target is not a file"
+
+        start = max(1, int(start_line))
+        end = max(start, int(end_line))
+
+        text = target.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        chunk = lines[start - 1:end]
+        if not chunk:
+            return ""
+        return "\n".join(chunk)[:100000]
+
+    def _write_text_file(self, path: str, content: str) -> str:
+        target = self._resolve_write_file_path(path, allow_missing=True)
+        if target is None:
+            return "error: path is outside allowed directories (.wozclaw or workdir)"
+        if target.exists() and target.is_dir():
+            return "error: target is a directory"
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = str(content)
+        target.write_text(payload, encoding="utf-8")
+        return f"written {len(payload)} chars"
+
+    def _append_text_file(self, path: str, content: str) -> str:
+        target = self._resolve_write_file_path(path, allow_missing=True)
+        if target is None:
+            return "error: path is outside allowed directories (.wozclaw or workdir)"
+        if target.exists() and target.is_dir():
+            return "error: target is a directory"
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = str(content)
+        with target.open("a", encoding="utf-8") as file_obj:
+            file_obj.write(payload)
+        return f"appended {len(payload)} chars"
+
+    def _delete_file(self, path: str) -> str:
+        target = self._resolve_write_file_path(path)
+        if target is None:
+            return "error: path is outside allowed directories (.wozclaw or workdir)"
+        if not target.exists():
+            return "error: file does not exist"
+        if not target.is_file():
+            return "error: target is not a file"
+
+        target.unlink()
+        return "deleted"
+
+    def _patch_text_file(self, path: str, patch_content: str) -> str:
+        """Apply unified diff patch to a file. patch_content should be unified diff format."""
+        import difflib
+        import re as regex_module
+
+        target = self._resolve_write_file_path(path)
+        if target is None:
+            return "error: path is outside allowed directories (.wozclaw or workdir)"
+        if not target.exists():
+            return "error: file does not exist"
+        if not target.is_file():
+            return "error: target is not a file"
+
+        try:
+            original_content = target.read_text(
+                encoding="utf-8", errors="replace")
+            original_lines = original_content.splitlines(keepends=True)
+
+            # Parse the patch
+            patch_lines = patch_content.splitlines(keepends=True)
+            if not patch_lines:
+                return "error: empty patch content"
+
+            # Apply patch using simple line-based patching
+            patched_lines = self._apply_unified_diff(
+                original_lines, patch_lines)
+            if patched_lines is None:
+                return "error: patch application failed - unable to apply patch to file"
+
+            patched_content = "".join(patched_lines)
+            target.write_text(patched_content, encoding="utf-8")
+            return "patch applied successfully"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    def _apply_unified_diff(self, original_lines: list[str], patch_lines: list[str]) -> list[str] | None:
+        """Apply unified diff patch to original lines."""
+        result = list(original_lines)
+        current_line = 0
+        i = 0
+
+        while i < len(patch_lines):
+            line = patch_lines[i]
+
+            # Skip headers and other metadata
+            if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
+                # Parse hunk header like @@ -10,5 +10,6 @@
+                if line.startswith("@@"):
+                    match = re.search(
+                        r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+                    if match:
+                        # Convert to 0-based index
+                        current_line = int(match.group(3)) - 1
+                i += 1
+                continue
+
+            if line.startswith("-"):
+                # Remove line
+                if current_line < len(result) and result[current_line].rstrip("\n") == line[1:].rstrip("\n"):
+                    result.pop(current_line)
+                else:
+                    return None  # Patch doesn't match
+            elif line.startswith("+"):
+                # Add line
+                result.insert(current_line, line[1:])
+                current_line += 1
+            elif line.startswith(" "):
+                # Context line - just advance
+                current_line += 1
+            elif line.startswith("\\"):
+                # No newline indicator - skip
+                pass
+            else:
+                # Other characters - might be file header or other metadata
+                pass
+
+            i += 1
+
+        return result
+
+    def _search_in_file(self, path: str, pattern: str, limit: int = 50) -> str:
+        """Search for lines matching a pattern (regex) in a file."""
+        target = self._resolve_read_file_path(path)
+        if target is None:
+            return "error: file not found"
+        if not target.is_file():
+            return "error: target is not a file"
+
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines()
+            regex = re.compile(pattern)
+            matches = []
+            for line_num, line in enumerate(lines, 1):
+                if regex.search(line):
+                    matches.append(f"{line_num}: {line}")
+                    if len(matches) >= limit:
+                        break
+            if not matches:
+                return "no matches found"
+            return "\n".join(matches)
+        except re.error as exc:
+            return f"error: invalid regex pattern - {exc}"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    def _copy_file(self, src: str, dst: str) -> str:
+        """Copy a file from src to dst."""
+        src_target = self._resolve_read_file_path(src)
+        if src_target is None:
+            return "error: source file not found"
+        if not src_target.is_file():
+            return "error: source is not a file"
+
+        dst_target = self._resolve_write_file_path(dst, allow_missing=True)
+        if dst_target is None:
+            return "error: destination path is outside allowed directories (.wozclaw or workdir)"
+        if dst_target.exists() and dst_target.is_dir():
+            return "error: destination is a directory"
+
+        try:
+            dst_target.parent.mkdir(parents=True, exist_ok=True)
+            content = src_target.read_bytes()
+            dst_target.write_bytes(content)
+            return f"copied {len(content)} bytes"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    def _move_file(self, src: str, dst: str) -> str:
+        """Move or rename a file from src to dst."""
+        src_target = self._resolve_write_file_path(src)
+        if src_target is None:
+            return "error: source path is outside allowed directories (.wozclaw or workdir)"
+        if not src_target.exists():
+            return "error: source file does not exist"
+        if not src_target.is_file():
+            return "error: source is not a file"
+
+        dst_target = self._resolve_write_file_path(dst, allow_missing=True)
+        if dst_target is None:
+            return "error: destination path is outside allowed directories (.wozclaw or workdir)"
+        if dst_target.exists() and dst_target.is_dir():
+            return "error: destination is a directory"
+
+        try:
+            dst_target.parent.mkdir(parents=True, exist_ok=True)
+            src_target.rename(dst_target)
+            return f"moved {src} to {dst}"
+        except Exception as exc:
+            return f"error: {exc}"
+
+    def _replace_file_lines(self, path: str, start_line: int, end_line: int, content: str) -> str:
+        """Replace file content in the specified line range.
+
+        Args:
+            path: File path
+            start_line: Starting line number (1-based, inclusive)
+            end_line: Ending line number (1-based, inclusive)
+            content: New content to insert (can be multi-line)
+
+        Returns:
+            Status message
+        """
+        target = self._resolve_write_file_path(path)
+        if target is None:
+            return "error: path is outside allowed directories (.wozclaw or workdir)"
+        if not target.exists():
+            return "error: file does not exist"
+        if not target.is_file():
+            return "error: target is not a file"
+
+        try:
+            # Read original content
+            original_text = target.read_text(
+                encoding="utf-8", errors="replace")
+            lines = original_text.splitlines(keepends=True)
+
+            # Validate line numbers
+            start = max(1, int(start_line))
+            end = max(start, int(end_line))
+
+            if start > len(lines) + 1:
+                return f"error: start_line {start} exceeds file length ({len(lines)})"
+
+            effective_end = min(end, len(lines))
+
+            # Prepare new content lines
+            new_lines = content.splitlines(keepends=True)
+            if content and not content.endswith('\n'):
+                # Ensure last line has newline if original content needs it
+                if new_lines:
+                    new_lines[-1] = new_lines[-1] + '\n'
+                else:
+                    new_lines = [content]
+
+            # Build result: keep lines before, insert new content, keep lines after
+            result_lines = lines[:start - 1] + \
+                new_lines + lines[effective_end:]
+
+            # Join and write back
+            result_text = ''.join(result_lines)
+            target.write_text(result_text, encoding="utf-8")
+
+            replaced_count = max(0, effective_end - start + 1)
+            return f"replaced lines {start}-{effective_end} ({replaced_count} lines)"
+        except Exception as exc:
+            return f"error: {exc}"
 
     def _register_user_skills(self, toolkit: Toolkit) -> None:
         self._loaded_skills = []
@@ -1338,18 +2003,49 @@ class ReActMemoryAgent:
             return content
         if not isinstance(content, list):
             return str(content)
-        chunks: list[str] = []
+        text_chunks: list[str] = []
+        thinking_chunks: list[str] = []
         for block in content:
             if isinstance(block, dict):
-                text_value = block.get("text") if block.get(
-                    "type") == "text" else block.get("content", "")
-                if text_value:
-                    chunks.append(str(text_value))
+                block_type = str(block.get("type", "")).strip().lower()
+                if block_type == "text":
+                    text_value = block.get("text", "")
+                    if text_value:
+                        text_chunks.append(str(text_value))
+                    continue
+                if block_type in {"thinking", "reasoning"}:
+                    thinking_value = block.get("thinking") or block.get(
+                        "text") or block.get("content", "")
+                    if thinking_value:
+                        thinking_chunks.append(str(thinking_value))
+                    continue
+                content_value = block.get("content", "")
+                if content_value:
+                    text_chunks.append(str(content_value))
                 continue
+
+            block_type = str(getattr(block, "type", "")).strip().lower()
+            if block_type in {"thinking", "reasoning"}:
+                thinking_value = getattr(block, "thinking", "") or getattr(
+                    block, "text", "") or getattr(block, "content", "")
+                if thinking_value:
+                    thinking_chunks.append(str(thinking_value))
+                continue
+
             text_attr = getattr(block, "text", "")
             if text_attr:
-                chunks.append(str(text_attr))
-        return "\n".join(chunks).strip()
+                text_chunks.append(str(text_attr))
+                continue
+
+            content_attr = getattr(block, "content", "")
+            if content_attr:
+                text_chunks.append(str(content_attr))
+
+        if text_chunks:
+            return "\n".join(text_chunks).strip()
+        if thinking_chunks:
+            return "\n".join(thinking_chunks).strip()
+        return ""
 
     def _run_async(self, coro: Any) -> Any:
         try:
@@ -1401,6 +2097,45 @@ class ReActMemoryAgent:
         except Exception:
             pass
 
+    def _build_compact_session_memory_prompt(self, session_memory: str) -> str:
+        recent_tail = self._render_recent_session_messages()
+        return (
+            "请将下面的会话记忆压缩为高密度摘要。\n"
+            f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
+            "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
+            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n"
+            "最后必须单独追加一行‘最新任务状态：...’。\n"
+            "判断最新任务时，优先参考最近会话尾部，而不是旧摘要里较早的任务。\n"
+            "如果最近用户请求是压缩上下文、compact_context、上下文压缩或整理记忆，最后一行必须写‘最新任务状态：上下文压缩已完成，目前无任务’。\n"
+            "如果没有明确未完成任务，写‘最新任务状态：无明确未完成任务’。\n\n"
+            f"最近会话尾部：\n{recent_tail}\n\n"
+            f"原始会话记忆：\n{session_memory}"
+        )
+
+    def _render_recent_session_messages(self, rounds: int = 3) -> str:
+        try:
+            rows = self.memory_store.get_recent_session_messages(
+                self.user_id,
+                self.session_id,
+                rounds=rounds,
+            )
+        except Exception:
+            return "(无)"
+
+        if not rows:
+            return "(无)"
+
+        lines: list[str] = []
+        for row in rows:
+            role = str(row.get("role", "")).strip() or "unknown"
+            name = str(row.get("name", "")).strip()
+            content = str(row.get("content", "")).strip()
+            if name:
+                lines.append(f"{role}/{name}: {content}")
+            else:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines).strip() or "(无)"
+
     def _compact_session_memory_now(self, force: bool = False) -> bool:
         if self._compact_model is None:
             return False
@@ -1415,13 +2150,7 @@ class ReActMemoryAgent:
         if not force and token_count <= SESSION_MEMORY_COMPACT_THRESHOLD_TOKENS:
             return False
 
-        prompt = (
-            "请将下面的会话记忆压缩为高密度摘要。\n"
-            f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
-            "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
-            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n\n"
-            f"原始会话记忆：\n{raw_memory}"
-        )
+        prompt = self._build_compact_session_memory_prompt(raw_memory)
         response = self._run_async(
             self._compact_model(
                 [
@@ -1479,41 +2208,32 @@ class ReActMemoryAgent:
             "<ROLE>你是一个带记忆的全能助手，会优先遵守长期记忆中的稳定偏好。</ROLE>\n"
             "<MISSION>在最少猜测下给出可验证、可追溯的回答与帮助。</MISSION>\n\n"
             "<MEMORY_RULES>\n"
-            "1) 当用户信息有新增或变化时，你可以调用 remember_note。\n"
-            "2) remember_note 的 note 必须是 memory.md 的完整版本，不是增量补丁。\n"
-            "3) 完整版本必须保留旧信息（仍然有效的部分）并融合最新变化。\n"
-            "4) 若新信息明确否定旧偏好，应替换冲突项，避免并存冲突表述。\n"
+            "1) 用户信息新增/变化时，可调用 remember_note。\n"
+            "2) remember_note.note 必须是 memory.md 的完整新版本（非增量）。\n"
+            "3) 保留仍有效旧信息并融合新信息；若冲突，以最新明确信息覆盖旧信息。\n"
             "</MEMORY_RULES>\n\n"
             "<TOOL_POLICY>\n"
-            "工具使用总原则：优先调用工具，能调用工具就调用工具；只要工具可提供事实依据，必须先调用再回答。\n"
-            "只有在工具确实无法解决问题时，才允许不调用工具并直接说明原因。\n"
-            "禁止仅凭猜测回答可被工具验证的问题。\n"
-            "当你对用户偏好或方案拿不准时，调用 ask_human_choice 给出候选选项。\n"
-            "ask_human_choice 的 options 请给 2-5 个简短选项，并允许用户自定义输入。\n"
-            "当会话变长、上下文冗余或连续多轮后，你应主动调用 compact_context 将当前有效上下文压缩为会话记忆（注意保留关键细节），不要等待用户提醒。\n"
+            "总原则：能用工具就先用工具；可验证问题禁止猜测。\n"
+            "文件相关优先使用文件工具：list_dir、file_exists、read_file、search_file、write_file、append_file、replace_file_lines、patch_file、copy_file、move_file、delete_file。\n"
+            "仅当工具无法解决时，才可直接回答并说明原因。\n"
+            "不确定用户偏好或方案时，调用 ask_human_choice；options 提供 2-5 个简短选项并允许自定义。\n"
+            "会话变长或冗余时，主动调用 compact_context 压缩上下文。\n"
             "</TOOL_POLICY>\n\n"
             "<CONTEXT_RETRIEVAL>\n"
-            "默认只提供长期记忆。短期会话记忆会作为单独的用户消息传入。\n"
-            "若需要 session 或 daily 历史消息，必须先搜索。\n"
-            "search_session 与 search_daily 会返回 message_id。\n"
-            "命中后如需扩展上下文，使用 get_session_window(message_id, before, after)。\n"
-            "daily 同理使用 get_daily_window(message_id, before, after, day)。\n"
+            "默认仅注入长期记忆；短期会话记忆通过单独用户消息提供。\n"
+            "需要 session/daily 历史时先 search_session/search_daily，再用 message_id 调用 get_session_window/get_daily_window 扩展上下文。\n"
             "</CONTEXT_RETRIEVAL>\n\n"
             "<BASH_POLICY>\n"
-            "需要读取或修改技能文件时，必须使用 bash_command。\n"
-            "执行流程必须遵循：搜索优先 -> 最小读取 -> 再修改。\n"
-            "优先用搜索命令定位目标（如 rg、grep）；不要无搜索直接大段读取。\n"
-            "每次读取都要有明确目的，按需最小读取，避免一次读取整文件。\n"
-            "在 Bash 里需要精确替换部分内容时，优先使用 sed（行级/范围替换）、awk（条件替换）、perl（复杂模式）。\n"
-            "非必要不要替换整个文件。\n"
-            "bash_command 默认在当前 Bash 工作目录执行；每次命令执行后，工作目录会保持为该命令结束时所在目录。\n"
-            "bash_command 输出最多保留100000字符。\n"
-            "可使用分段读取进一步控制上下文规模。\n"
+            "需要执行命令时使用 bash_command。\n"
+            "文件浏览/读写优先文件工具，不要先用 bash_command。\n"
+            "长任务或仅需启动任务时使用 bash_command(background=true)。\n"
+            "编辑流程：先搜索定位，再最小读取，最后最小修改；非必要不整文件替换。\n"
+            "bash_command 在当前 Bash 工作目录执行，并在命令后保持目录状态；输出最多保留100000字符。\n"
             "</BASH_POLICY>\n\n"
             "<PATHS>\n"
             f"工作目录: {self._root_work_dir(as_bash=False)}\n"
             f"配置目录: {self._wozclaw_dir(as_bash=False)}\n"
-            "skills目录位于配置目录下。\n"
+            "skills 目录位于配置目录下。\n"
             "</PATHS>\n\n"
             f"<USER>当前用户ID: {self.user_id}</USER>\n\n"
             f"<MEMORY>\n{memory_context}\n</MEMORY>"

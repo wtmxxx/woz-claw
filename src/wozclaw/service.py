@@ -205,14 +205,23 @@ class LLMDialogueRecorder:
         self._auto_tool_traces = []
         return rows
 
-    async def _compact_session_memory(self, session_memory: str) -> str:
-        prompt = (
+    def _build_compact_session_memory_prompt(self, session_memory: str) -> str:
+        recent_tail = self._render_recent_session_messages()
+        return (
             "请将下面的会话记忆压缩为高密度摘要。\n"
             f"目标不超过约 {SESSION_MEMORY_COMPACT_TARGET_TOKENS} token。\n"
             "必须保留：用户偏好、进行中的任务、约束、已完成结论、未完成事项、关键路径与文件。\n"
-            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n\n"
+            "输出要求：只输出压缩结果正文，不要解释，不要 markdown 标题。\n"
+            "最后必须单独追加一行‘最新任务状态：...’。\n"
+            "判断最新任务时，优先参考最近会话尾部，而不是旧摘要里较早的任务。\n"
+            "如果最近用户请求是压缩上下文、compact_context、上下文压缩或整理记忆，最后一行必须写‘最新任务状态：上下文压缩已完成，目前无任务’。\n"
+            "如果没有明确未完成任务，写‘最新任务状态：无明确未完成任务’。\n\n"
+            f"最近会话尾部：\n{recent_tail}\n\n"
             f"原始会话记忆：\n{session_memory}"
         )
+
+    async def _compact_session_memory(self, session_memory: str) -> str:
+        prompt = self._build_compact_session_memory_prompt(session_memory)
         response = await self._compact_model(
             [
                 {
@@ -228,6 +237,30 @@ class LLMDialogueRecorder:
             ]
         )
         return self._extract_assistant_text(response)
+
+    def _render_recent_session_messages(self, rounds: int = 3) -> str:
+        try:
+            rows = self._memory_store.get_recent_session_messages(
+                self._user_id,
+                self._session_id,
+                rounds=rounds,
+            )
+        except Exception:
+            return "(无)"
+
+        if not rows:
+            return "(无)"
+
+        lines: list[str] = []
+        for row in rows:
+            role = str(row.get("role", "")).strip() or "unknown"
+            name = str(row.get("name", "")).strip()
+            content = str(row.get("content", "")).strip()
+            if name:
+                lines.append(f"{role}/{name}: {content}")
+            else:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines).strip() or "(无)"
 
     def _estimate_text_tokens(self, text: str) -> int:
         content = str(text or "")
@@ -312,6 +345,8 @@ class ChatService:
         self._title_generator = title_generator
         self._pending_runtime_agents: dict[str, Any] = {}
         self._tool_trace_queues: dict[str, asyncio.Queue] = {}
+        self._buffered_tool_trace_events: dict[str, list[dict[str, Any]]] = {}
+        self._max_buffered_tool_trace_events = 200
         self._pending_approval_trace_ids: dict[tuple[str, str, str], str] = {}
 
     def subscribe_tool_traces(self, session_id: str) -> AsyncGenerator[str, None]:
@@ -330,11 +365,32 @@ class ChatService:
             self._tool_trace_queues.pop(session_id, None)
 
     def push_tool_trace_event(self, session_id: str, event: dict[str, Any]) -> None:
-        if session_id in self._tool_trace_queues:
+        session_text = str(session_id or "").strip()
+        if not session_text:
+            return
+
+        payload = dict(event) if isinstance(event, dict) else {}
+        queue = self._tool_trace_queues.get(session_text)
+        if queue is not None:
             try:
-                self._tool_trace_queues[session_id].put_nowait(event)
+                queue.put_nowait(payload)
+                return
             except Exception:
                 pass
+
+        buffered = self._buffered_tool_trace_events.setdefault(
+            session_text, [])
+        buffered.append(payload)
+        overflow = len(buffered) - self._max_buffered_tool_trace_events
+        if overflow > 0:
+            del buffered[:overflow]
+
+    def consume_buffered_tool_trace_events(self, session_id: str) -> list[dict[str, Any]]:
+        session_text = str(session_id or "").strip()
+        if not session_text:
+            return []
+        rows = self._buffered_tool_trace_events.pop(session_text, [])
+        return rows if isinstance(rows, list) else []
 
     def remember_pending_approval_trace_id(
         self,
@@ -453,10 +509,81 @@ class ChatService:
         )
 
         runtime_agent: Any = None
+        collected_thinking_texts: list[str] = []
+        collected_assistant_texts: list[str] = []
+        collected_ui_timeline_events: list[dict[str, Any]] = []
+
+        def append_ui_timeline_event(event_type: str, payload: dict[str, Any]) -> None:
+            event_name = str(event_type or "").strip()
+            if not event_name:
+                return
+            safe_payload = dict(payload) if isinstance(payload, dict) else {}
+            item: dict[str, Any] = {"type": event_name, **safe_payload}
+            item["order"] = len(collected_ui_timeline_events) + 1
+            collected_ui_timeline_events.append(item)
+
         if self._agent is None:
             runtime_agent = ReActMemoryAgent(
                 memory_store=self.memory_store, user_id=user_id, session_id=session_id
             )
+
+            def emit_runtime_thinking_texts() -> None:
+                consume = getattr(
+                    runtime_agent, "consume_auto_thinking_texts", None)
+                if not callable(consume):
+                    return
+                try:
+                    rows = consume()
+                except Exception:
+                    return
+                if not isinstance(rows, list):
+                    return
+                for raw_text in rows:
+                    text = str(raw_text or "").strip()
+                    if not text:
+                        continue
+                    collected_thinking_texts.append(text)
+                    append_ui_timeline_event(
+                        "assistant_thinking",
+                        {
+                            "text": text,
+                        },
+                    )
+                    push_event(
+                        "assistant_thinking",
+                        {
+                            "text": text,
+                        },
+                    )
+
+            def emit_runtime_assistant_texts() -> None:
+                consume = getattr(
+                    runtime_agent, "consume_auto_assistant_texts", None)
+                if not callable(consume):
+                    return
+                try:
+                    rows = consume()
+                except Exception:
+                    return
+                if not isinstance(rows, list):
+                    return
+                for raw_text in rows:
+                    text = str(raw_text or "").strip()
+                    if not text:
+                        continue
+                    collected_assistant_texts.append(text)
+                    append_ui_timeline_event(
+                        "assistant_text",
+                        {
+                            "text": text,
+                        },
+                    )
+                    push_event(
+                        "assistant_text",
+                        {
+                            "text": text,
+                        },
+                    )
 
             push_event(
                 "status", {"status": "agent_ready", "message": "Agent 准备就绪"})
@@ -468,6 +595,8 @@ class ChatService:
                     trace_id = uuid4().hex[:12]
                     output_text = runtime_agent._stringify_tool_value(
                         output_value)
+                    emit_runtime_thinking_texts()
+                    emit_runtime_assistant_texts()
                     push_event(
                         "tool_calling",
                         {
@@ -503,6 +632,15 @@ class ChatService:
                             "output": output_text,
                         },
                     )
+                    append_ui_timeline_event(
+                        "tool",
+                        {
+                            "trace_id": trace_id,
+                            "name": str(name or "").strip() or "tool",
+                            "input": runtime_agent._stringify_tool_value(input_value),
+                            "output": output_text,
+                        },
+                    )
 
                 runtime_agent._record_tool_trace = wrapped_record_tool_trace
 
@@ -529,6 +667,10 @@ class ChatService:
                     activity_traces=[],
                 )
 
+            if runtime_agent is not None:
+                emit_runtime_thinking_texts()
+                emit_runtime_assistant_texts()
+
         push_event(
             "status", {"status": "generating_reply", "message": "正在生成回复"})
 
@@ -550,6 +692,12 @@ class ChatService:
             assistant_meta["loaded_skills"] = loaded_skills
         if persisted_activity_traces:
             assistant_meta["activity_traces"] = persisted_activity_traces
+        if collected_thinking_texts:
+            assistant_meta["ui_thinking_texts"] = collected_thinking_texts
+        if collected_assistant_texts:
+            assistant_meta["ui_assistant_texts"] = collected_assistant_texts
+        if collected_ui_timeline_events:
+            assistant_meta["ui_timeline_events"] = collected_ui_timeline_events
 
         record_session_memory = approval_request is None and not (
             runtime_agent is not None
@@ -803,6 +951,7 @@ class ChatService:
         result: list[dict[str, Any]] = []
         for row in rows:
             meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            raw_meta = dict(meta) if isinstance(meta, dict) else {}
             raw_tool_calls = meta.get(
                 "tool_calls") if isinstance(meta, dict) else []
             tool_calls: list[dict[str, str]] = []
@@ -858,6 +1007,7 @@ class ChatService:
                     "message_id": int(row.get("message_id", 0))
                     if str(row.get("message_id", "")).isdigit()
                     else 0,
+                    "meta": raw_meta,
                     "tool_calls": tool_calls,
                     "loaded_skills": loaded_skills,
                     "activity_traces": activity_traces,

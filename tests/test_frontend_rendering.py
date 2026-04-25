@@ -143,6 +143,44 @@ def test_frontend_realtime_tool_traces_use_trace_ids() -> None:
     assert "pendingTraces[traceId]" in html
 
 
+def test_frontend_handles_collapsible_thinking_blocks() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "type === 'assistant_thinking'" in html
+    assert "handleAssistantThinkingEvent(event);" in html
+    assert "function handleAssistantThinkingEvent(event)" in html
+    assert "思考过程（点击展开）" in html
+
+
+def test_frontend_handles_realtime_assistant_text_events() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "type === 'assistant_text'" in html
+    assert "handleAssistantTextEvent(event);" in html
+    assert "function handleAssistantTextEvent(event)" in html
+
+
+def test_frontend_history_loader_reads_persisted_ui_meta() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "item.meta || {}" in html
+    assert "ui_thinking_texts" in html
+    assert "ui_assistant_texts" in html
+    assert "normalizeTextList(meta.ui_thinking_texts" in html
+    assert "normalizeTextList(meta.ui_assistant_texts" in html
+
+
+def test_frontend_history_loader_reads_persisted_ui_timeline_events() -> None:
+    html_path = Path("src/wozclaw/static/index.html")
+    html = html_path.read_text(encoding="utf-8")
+
+    assert "ui_timeline_events" in html
+    assert "normalizeTimelineEvents" in html
+
+
 def test_frontend_approval_card_shows_approved_running_state() -> None:
     html_path = Path("src/wozclaw/static/index.html")
     html = html_path.read_text(encoding="utf-8")

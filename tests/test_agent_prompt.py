@@ -1,5 +1,6 @@
 import asyncio
 
+from agentscope.formatter import DeepSeekChatFormatter
 from wozclaw.agent import LLMDialogueRecorder, ReActMemoryAgent, ApprovalInterrupt
 from wozclaw.memory_store import MemoryStore
 from pathlib import Path
@@ -15,7 +16,52 @@ def test_memory_prompt_requires_full_memory_rewrite(tmp_path) -> None:
     prompt = agent.build_system_prompt("[LONG_TERM]\n用户喜欢游泳")
 
     assert "完整" in prompt
-    assert "你应主动调用 compact_context" in prompt
+    assert "read_file" in prompt
+    assert "write_file" in prompt
+    assert "文件操作优先使用这些工具" in prompt
+    assert "background" in prompt
+
+
+def test_file_tools_basic_operations(tmp_path, monkeypatch) -> None:
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-file", session_id="s-file")
+
+    monkeypatch.setattr(
+        agent,
+        "_root_work_dir",
+        lambda as_bash=False: tmp_path if not as_bash else tmp_path.as_posix(),
+    )
+
+    write_out = agent._write_text_file("docs/demo.txt", "line1\nline2\nline3")
+    assert write_out.startswith("written")
+    list_out = agent._list_directory("docs")
+    assert "demo.txt" in list_out
+
+    exists_out = agent._file_exists("docs/demo.txt")
+    assert "true" in exists_out
+
+    append_out = agent._append_text_file("docs/demo.txt", "\nline4")
+    assert append_out.startswith("appended")
+    assert "line4" in agent._read_text_file(
+        "docs/demo.txt", start_line=1, end_line=20)
+
+    delete_out = agent._delete_file("docs/demo.txt")
+    assert delete_out.startswith("deleted")
+    assert "false" in agent._file_exists("docs/demo.txt")
+
+
+def test_file_tools_block_path_escape(tmp_path, monkeypatch) -> None:
+    agent = ReActMemoryAgent(memory_store=MemoryStore(
+        root_dir=tmp_path), user_id="u-file-2", session_id="s-file-2")
+
+    monkeypatch.setattr(
+        agent,
+        "_root_work_dir",
+        lambda as_bash=False: tmp_path if not as_bash else tmp_path.as_posix(),
+    )
+
+    out = agent._write_text_file("../escape.txt", "blocked")
+    assert out.startswith("error: path is outside workdir")
 
 
 def test_agent_module_no_langchain_or_langgraph_imports() -> None:
@@ -24,6 +70,42 @@ def test_agent_module_no_langchain_or_langgraph_imports() -> None:
     assert "from langchain_core" not in source
     assert "from langgraph" not in source
     assert "from langchain_openai" not in source
+
+
+def test_react_agent_uses_deepseek_formatter_for_deepseek_model(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyReActAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            captured["formatter"] = kwargs.get("formatter")
+
+        async def reply(self, msg):  # noqa: ANN001
+            _ = msg
+            return SimpleNamespace(content="ok")
+
+    monkeypatch.setattr(
+        "wozclaw.agent.load_llm_config",
+        lambda: SimpleNamespace(
+            api_key="dummy-key",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com/v1",
+            compact_model="",
+        ),
+    )
+    monkeypatch.setattr("wozclaw.agent.ReActAgent", DummyReActAgent)
+    monkeypatch.setattr(
+        ReActMemoryAgent,
+        "_build_chat_model",
+        lambda self, **kwargs: object(),
+    )
+
+    ReActMemoryAgent(
+        memory_store=MemoryStore(root_dir=tmp_path),
+        user_id="u-formatter",
+        session_id="s-formatter",
+    )
+
+    assert isinstance(captured.get("formatter"), DeepSeekChatFormatter)
 
 
 def test_llm_dialogue_recorder_writes_assistant_prelude_before_tool_trace(tmp_path: Path) -> None:
@@ -65,6 +147,109 @@ def test_llm_dialogue_recorder_writes_assistant_prelude_before_tool_trace(tmp_pa
     assert "[tool] bash_command" in text
     assert text.index("assistant: 我来查看一下当前的工作目录。") < text.index(
         "[tool] bash_command")
+
+
+def test_llm_dialogue_recorder_exposes_thinking_without_persisting_it(tmp_path: Path) -> None:
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(
+                content=[
+                    {"type": "thinking", "thinking": "我在分析路径和上下文。"},
+                    {"type": "text", "text": "我先查看一下。"},
+                ]
+            )
+
+    store = MemoryStore(root_dir=tmp_path)
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-thinking",
+        "s-thinking",
+    )
+
+    response = asyncio.run(
+        recorder([SimpleNamespace(role="user", content="查看目录")]))
+
+    thinking_texts = recorder.consume_auto_thinking_texts()
+    assert thinking_texts == ["我在分析路径和上下文。"]
+    assert response.content[1]["text"] == "我先查看一下。"
+
+    state = store.get_session_state("u-thinking", "s-thinking")
+    text = str(state.get("session_memory", ""))
+    assert "我在分析路径和上下文。" not in text
+    assert "assistant: 我先查看一下。" in text
+
+
+def test_react_memory_agent_proxies_auto_thinking_texts_from_recorder() -> None:
+    agent = ReActMemoryAgent.__new__(ReActMemoryAgent)
+    agent._dialogue_recorder = SimpleNamespace(
+        consume_auto_thinking_texts=lambda: ["先检查路径", "再执行命令"]
+    )
+
+    assert agent.consume_auto_thinking_texts() == ["先检查路径", "再执行命令"]
+
+
+def test_react_memory_agent_reports_llm_not_configured_instead_of_generic_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "wozclaw.agent.load_llm_config",
+        lambda: SimpleNamespace(
+            api_key="",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com/v1",
+            compact_model="",
+        ),
+    )
+
+    agent = ReActMemoryAgent(
+        memory_store=MemoryStore(root_dir=tmp_path),
+        user_id="u-no-llm",
+        session_id="s-no-llm",
+    )
+    response = agent.respond("测试消息", "长期上下文")
+
+    assert "我已经记录到记忆中" not in response.text
+    assert "LLM" in response.text
+
+
+def test_react_memory_agent_uses_thinking_as_reply_when_text_is_empty(monkeypatch, tmp_path: Path) -> None:
+    class DummyReActAgent:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+
+        async def reply(self, msg):  # noqa: ANN001
+            _ = msg
+            return SimpleNamespace(
+                content=[
+                    {"type": "thinking", "thinking": "我先整理步骤再继续执行。"},
+                ]
+            )
+
+    monkeypatch.setattr(
+        "wozclaw.agent.load_llm_config",
+        lambda: SimpleNamespace(
+            api_key="dummy-key",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com/v1",
+            compact_model="",
+        ),
+    )
+    monkeypatch.setattr("wozclaw.agent.ReActAgent", DummyReActAgent)
+    monkeypatch.setattr(
+        ReActMemoryAgent,
+        "_build_chat_model",
+        lambda self, **kwargs: object(),
+    )
+
+    agent = ReActMemoryAgent(
+        memory_store=MemoryStore(root_dir=tmp_path),
+        user_id="u-thinking-reply",
+        session_id="s-thinking-reply",
+    )
+    result = agent.respond("测试", "长期上下文")
+
+    assert result.text == "我先整理步骤再继续执行。"
 
 
 def test_llm_dialogue_recorder_filters_react_messages_to_system_and_session_memory_only(tmp_path: Path) -> None:
@@ -230,6 +415,163 @@ def test_llm_dialogue_recorder_auto_compacts_session_memory_before_react_node(tm
     assert "assistant: 上下文压缩成功。" not in text
     assert "[tool] compact_context" in text
     assert "输出: 上下文压缩成功" in text
+
+
+def test_compact_prompt_marks_latest_task_when_latest_request_is_compact_context(
+    tmp_path: Path,
+) -> None:
+    captured = {}
+
+    class DummyCompactModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = kwargs
+            captured["prompt"] = prompt
+            return SimpleNamespace(content=[{"type": "text", "text": "压缩后的会话记忆"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    store.append_session_message(
+        "u-tail-note",
+        "s-tail-note",
+        "user",
+        "请帮我压缩上下文",
+    )
+    store.update_session_state(
+        "u-tail-note",
+        "s-tail-note",
+        {"session_memory": "a" * 124000},
+    )
+
+    store.append_session_message(
+        "u-tail-note",
+        "s-tail-note",
+        "user",
+        "请帮我压缩上下文",
+    )
+
+    agent = ReActMemoryAgent(store, "u-tail-note", "s-tail-note")
+    agent._compact_model = DummyCompactModel()  # type: ignore[assignment]
+
+    assert agent._compact_session_memory_now(force=True) is True
+
+    prompt = captured["prompt"]
+    assert isinstance(prompt, list)
+    prompt_text = str(prompt[1]["content"])
+    assert "最近会话尾部" in prompt_text
+    assert "请帮我压缩上下文" in prompt_text
+    assert "最新任务状态" in prompt_text
+    assert "最新任务状态：上下文压缩已完成，目前无任务" in prompt_text
+
+
+def test_llm_dialogue_recorder_auto_compacts_session_memory_without_tail_marker(
+    tmp_path: Path,
+) -> None:
+    class DummyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "ok"}])
+
+    class DummyCompactModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "压缩后的会话记忆"}])
+
+    store = MemoryStore(root_dir=tmp_path)
+    store.append_session_message(
+        "u-current-task",
+        "s-current-task",
+        "user",
+        "请保留当前任务",
+    )
+    # ASCII text token estimate is roughly len/4, so this is > 30k tokens.
+    store.update_session_state(
+        "u-current-task",
+        "s-current-task",
+        {"session_memory": "a" * 124000},
+    )
+
+    recorder = LLMDialogueRecorder(
+        DummyModel(),
+        store,
+        "u-current-task",
+        "s-current-task",
+        compact_model=DummyCompactModel(),
+        compact_threshold_tokens=30000,
+    )
+
+    prompt = [
+        {"role": "system", "name": "system", "content": [
+            {"type": "text", "text": "sys"}]},
+        {"role": "user", "name": "user", "content": [
+            {"type": "text", "text": "继续"}]},
+    ]
+
+    asyncio.run(recorder(prompt))
+
+    state = store.get_session_state("u-current-task", "s-current-task")
+    text = str(state.get("session_memory", ""))
+    assert text.startswith("压缩后的会话记忆")
+    assert "[tool] compact_context" in text
+    assert text.endswith("assistant: ok")
+
+
+def test_react_memory_agent_compact_context_without_tail_marker(
+    tmp_path: Path,
+) -> None:
+    class DummyCompactModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content=[{"type": "text", "text": "压缩后的会话记忆"}])
+
+    class DummyReplyModel:
+        async def __call__(self, prompt, **kwargs):
+            _ = prompt
+            _ = kwargs
+            return SimpleNamespace(content="")
+
+    store = MemoryStore(root_dir=tmp_path)
+    store.append_session_message(
+        "u-agent-compact",
+        "s-agent-compact",
+        "user",
+        "请保留当前任务",
+    )
+    store.update_session_state(
+        "u-agent-compact",
+        "s-agent-compact",
+        {"session_memory": "a" * 124000},
+    )
+
+    agent = ReActMemoryAgent(store, "u-agent-compact", "s-agent-compact")
+    agent._compact_model = DummyCompactModel()  # type: ignore[assignment]
+    agent._dialogue_recorder = LLMDialogueRecorder(  # type: ignore[assignment]
+        DummyReplyModel(),
+        store,
+        "u-agent-compact",
+        "s-agent-compact",
+    )
+
+    assert agent._compact_session_memory_now(force=True) is True
+    store.append_session_memory_tool_trace(
+        "u-agent-compact",
+        "s-agent-compact",
+        "compact_context",
+        "",
+        "上下文压缩成功",
+    )
+    store.append_session_message(
+        "u-agent-compact",
+        "s-agent-compact",
+        "assistant",
+        "后续助手回复",
+    )
+    state = store.get_session_state("u-agent-compact", "s-agent-compact")
+    text = str(state.get("session_memory", ""))
+    assert text.startswith("压缩后的会话记忆")
+    assert "[tool] compact_context" in text
+    assert text.endswith("assistant: 后续助手回复")
 
 
 def test_respond_handles_read_only_sys_prompt(monkeypatch, tmp_path) -> None:
@@ -541,7 +883,9 @@ def test_toolkit_skill_prompt_uses_xml_and_bash_path(monkeypatch, tmp_path) -> N
     assert "multiple files" in prompt
     assert "references/" in prompt
     assert "assets/" in prompt
-    assert f'{agent._to_bash_path(skill_dir)}/SKILL.md' in prompt
+    expected_bash = f"{agent._to_bash_path(skill_dir)}/SKILL.md"
+    expected_native = f"{skill_dir}/SKILL.md"
+    assert expected_bash in prompt or expected_native in prompt
 
 
 def test_global_and_user_skills_are_merged(monkeypatch, tmp_path) -> None:
@@ -664,6 +1008,33 @@ def test_bash_policy_default_allows_read_but_requires_approval_for_write_and_del
 
     delete_out = agent._run_bash_command("rm root/a.txt")
     assert delete_out.startswith("__APPROVAL_REQUIRED__")
+
+
+def test_bash_command_background_starts_without_waiting(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(root_dir=tmp_path)
+    agent = ReActMemoryAgent(
+        memory_store=store, user_id="u10-bg", session_id="s10-bg")
+
+    class DummyProcess:
+        pid = 4321
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    out = agent._run_bash_command("sleep 5", background=True)
+
+    assert out.startswith("__BACKGROUND_STARTED__")
+    assert captured["args"][0][0:2] == ["bash", "-lc"]
+    assert "cd \"" in captured["args"][0][2]
+    assert "sleep 5" in captured["args"][0][2]
+    assert captured["kwargs"]["cwd"] == agent._root_work_dir()
+    assert captured["kwargs"]["start_new_session"] is True
 
 
 def test_bash_policy_can_deny_when_configured(monkeypatch, tmp_path) -> None:
@@ -852,6 +1223,7 @@ def test_bash_command_runs_in_default_sandbox_with_bash(monkeypatch, tmp_path) -
     assert captured["shell"] is False
     assert captured["encoding"] == "utf-8"
     assert captured["errors"] == "replace"
+    assert captured["timeout"] == 30
     assert isinstance(captured["cmd"], list)
     assert captured["cmd"][0] == "bash"
     assert captured["cmd"][1] == "-lc"

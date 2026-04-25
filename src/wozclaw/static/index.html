@@ -461,6 +461,7 @@
             gap: 10px;
             align-content: start;
             min-height: 0;
+            overflow-y: auto;
         }
 
         .msg {
@@ -541,6 +542,7 @@
             justify-self: start;
             max-width: min(78%, 760px);
             margin-inline: 0;
+            margin-left: 40px;
             display: grid;
             gap: 6px;
         }
@@ -577,6 +579,79 @@
             font-family: Consolas, "Courier New", monospace;
             font-size: 12px;
             line-height: 1.45;
+        }
+
+        .thinking-trace {
+            border: 1px solid #dbe3ef;
+            background: #f8fafc;
+            border-radius: var(--radius-sm);
+            padding: 10px 12px;
+            font-size: 13px;
+            color: #334155;
+            margin: 8px 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .thinking-trace summary {
+            cursor: pointer;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            gap: 8px;
+            color: #1e40af;
+        }
+
+        .thinking-trace summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .thinking-trace .thinking-toggle {
+            width: 14px;
+            font-size: 10px;
+            color: #3b82f6;
+            transition: transform 200ms ease;
+            flex-shrink: 0;
+            padding-top: 2px;
+        }
+
+        .thinking-trace[open] .thinking-toggle {
+            transform: rotate(90deg);
+        }
+
+        .thinking-trace .thinking-label {
+            font-weight: 700;
+            color: #1e40af;
+            margin-right: 4px;
+        }
+
+        .thinking-trace .thinking-preview {
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: #334155;
+        }
+
+        .thinking-trace[open] .thinking-preview {
+            display: none;
+        }
+
+        .thinking-trace pre {
+            margin: 8px 0 0;
+            padding: 8px;
+            border-radius: 8px;
+            background: #f1f5f9;
+            border: 1px solid #dbe3ef;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.45;
+            color: #334155;
+            max-height: 200px;
+            overflow-y: auto;
         }
 
         .realtime-trace {
@@ -756,6 +831,13 @@
             align-items: stretch;
         }
 
+        .composer-input-wrap {
+            min-width: 0;
+            display: flex;
+            align-items: stretch;
+            overflow: hidden;
+        }
+
         .composer input {
             border: none;
             border-radius: var(--radius-md);
@@ -764,6 +846,9 @@
             font-size: 14px;
             background: var(--surface-soft);
             color: var(--text);
+            width: 100%;
+            min-width: 0;
+            resize: none;
         }
 
         .composer input:focus {
@@ -1229,8 +1314,10 @@
                 <div id="messages" class="messages"></div>
 
                 <form id="chatForm" class="composer">
-                    <input id="text" autocomplete="off" placeholder="输入消息，例如：记住我喜欢中文回答"
-                        class="w-full rounded-xl border-0 bg-slate-50 text-slate-900" />
+                    <div class="composer-input-wrap">
+                        <input id="text" autocomplete="off" placeholder="输入消息，例如：记住我喜欢中文回答"
+                            class="w-full rounded-xl border-0 bg-slate-50 text-slate-900" />
+                    </div>
                     <button type="submit" class="inline-flex items-center justify-center">发送</button>
                 </form>
             </div>
@@ -1521,6 +1608,16 @@
                 return;
             }
 
+            if (type === 'assistant_thinking') {
+                handleAssistantThinkingEvent(event);
+                return;
+            }
+
+            if (type === 'assistant_text') {
+                handleAssistantTextEvent(event);
+                return;
+            }
+
             if (type === 'tool_calling') {
                 handleToolCallingEvent(event);
                 return;
@@ -1548,6 +1645,31 @@
                 clearTransientStatusMessages();
                 scheduleDisconnectEventSource();
             }
+        }
+
+        function handleAssistantThinkingEvent(event) {
+            const text = String(event.text || '').trim();
+            if (!text) {
+                return;
+            }
+
+            let block = getLatestAssistantBlock();
+            if (!block) {
+                block = document.createElement('div');
+                block.className = 'assistant-block space-y-2';
+                messagesEl.appendChild(block);
+            }
+
+            block.appendChild(createThinkingTraceDetails(text));
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        function handleAssistantTextEvent(event) {
+            const text = String(event.text || '').trim();
+            if (!text) {
+                return;
+            }
+            addAssistantMsg(text, [], [], []);
         }
 
         function handleToolCallingEvent(event) {
@@ -2093,7 +2215,200 @@
             pre.textContent = formatActivityTraces(merged, [], []);
         }
 
-        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = [], fromHistory = false) {
+        function normalizeTextList(value) {
+            if (!Array.isArray(value)) {
+                return [];
+            }
+            return value.map((item) => String(item || '').trim()).filter(Boolean);
+        }
+
+        function normalizeTimelineEvents(value) {
+            if (!Array.isArray(value)) {
+                return [];
+            }
+            return value
+                .map((item) => (item && typeof item === 'object' ? item : null))
+                .filter(Boolean)
+                .map((item, idx) => ({
+                    type: String(item.type || '').trim(),
+                    text: String(item.text || ''),
+                    name: String(item.name || ''),
+                    input: String(item.input || ''),
+                    output: String(item.output || ''),
+                    trace_id: String(item.trace_id || item.traceId || ''),
+                    order: Number(item.order || idx + 1),
+                }))
+                .filter((item) => item.type)
+                .sort((a, b) => a.order - b.order);
+        }
+
+        function appendThinkingBlock(block, text) {
+            const normalized = String(text || '').trim();
+            if (!normalized) {
+                return;
+            }
+
+            block.appendChild(createThinkingTraceDetails(normalized));
+        }
+
+        function createThinkingTraceDetails(text) {
+            const normalized = String(text || '').trim();
+            const details = document.createElement('details');
+            details.className = 'thinking-trace';
+            details.open = false;
+
+            const summary = document.createElement('summary');
+
+            const toggle = document.createElement('span');
+            toggle.className = 'thinking-toggle';
+            toggle.textContent = '▶';
+
+            const label = document.createElement('span');
+            label.className = 'thinking-label';
+            label.textContent = '思考';
+
+            const preview = document.createElement('span');
+            preview.className = 'thinking-preview';
+            preview.textContent = normalized;
+
+            summary.appendChild(toggle);
+            summary.appendChild(label);
+            summary.appendChild(preview);
+
+            const pre = document.createElement('pre');
+            pre.textContent = normalized;
+
+            details.appendChild(summary);
+            details.appendChild(pre);
+            return details;
+        }
+
+        function appendAssistantTextBlock(block, text) {
+            const normalized = String(text || '').trim();
+            if (!normalized) {
+                return;
+            }
+
+            const msg = document.createElement('div');
+            msg.className = 'msg a md rounded-chat';
+            const markdownHtml = marked.parse(normalized, {
+                breaks: true,
+                gfm: true,
+            });
+            msg.innerHTML = DOMPurify.sanitize(markdownHtml);
+            block.appendChild(msg);
+        }
+
+        function appendHistoryToolTraceCard(block, toolCall = {}) {
+            const name = String(toolCall.name || 'unknown');
+            const input = String(toolCall.input || '');
+            const output = String(toolCall.output || '');
+            const traceId = String(toolCall.trace_id || toolCall.traceId || `history-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
+            const isApprovalPlaceholderHistory = output.startsWith('__APPROVAL_REQUIRED__');
+            const isChoicePlaceholderHistory = output.startsWith('__CHOICE_REQUIRED__');
+            const isRejectedByHumanHistory = output.trim() === 'rejected by human';
+
+            let historyTraceStatus = 'completed';
+            let historyIconClass = 'trace-icon completed';
+            let historyIconText = '✓';
+            let historyStatusText = '已完成';
+            let historyCardStateClass = 'completed';
+
+            if (isApprovalPlaceholderHistory) {
+                historyTraceStatus = 'approval-pending';
+                historyIconClass = 'trace-icon pending';
+                historyIconText = '⏸';
+                historyStatusText = '待批准';
+                historyCardStateClass = 'pending';
+            } else if (isChoicePlaceholderHistory) {
+                historyTraceStatus = 'choice-pending';
+                historyIconClass = 'trace-icon pending';
+                historyIconText = '❓';
+                historyStatusText = '待选择';
+                historyCardStateClass = 'pending';
+            } else if (isRejectedByHumanHistory) {
+                historyTraceStatus = 'rejected';
+                historyIconClass = 'trace-icon completed';
+                historyIconText = '✕';
+                historyStatusText = '已拒绝';
+                historyCardStateClass = 'completed';
+            }
+
+            const traceEl = document.createElement('div');
+            traceEl.className = 'realtime-trace rounded-xl border border-slate-200 bg-slate-50/80';
+            traceEl.id = traceId;
+            traceEl.dataset.traceId = traceId;
+            traceEl.dataset.traceName = name;
+            traceEl.dataset.traceStatus = historyTraceStatus;
+            traceEl.classList.add(historyCardStateClass);
+
+            const header = document.createElement('div');
+            header.className = 'trace-header';
+
+            const toggle = document.createElement('span');
+            toggle.className = 'trace-toggle';
+            toggle.textContent = '▶';
+
+            const icon = document.createElement('span');
+            icon.className = historyIconClass;
+            icon.textContent = historyIconText;
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'trace-name';
+            nameSpan.textContent = `${name}`;
+
+            const status = document.createElement('span');
+            status.className = 'trace-status';
+            status.textContent = historyStatusText;
+
+            header.appendChild(toggle);
+            header.appendChild(icon);
+            header.appendChild(nameSpan);
+            header.appendChild(status);
+
+            const content = document.createElement('div');
+            content.className = 'trace-content';
+
+            const inputDiv = document.createElement('div');
+            inputDiv.className = 'trace-input';
+
+            const inputLabel = document.createElement('div');
+            inputLabel.className = 'trace-label';
+            inputLabel.textContent = '📥 输入:';
+
+            const inputContent = document.createElement('pre');
+            inputContent.textContent = input || '(无输入)';
+
+            inputDiv.appendChild(inputLabel);
+            inputDiv.appendChild(inputContent);
+
+            const outputDiv = document.createElement('div');
+            outputDiv.className = 'trace-output';
+
+            const outputLabel = document.createElement('div');
+            outputLabel.className = 'trace-label';
+            outputLabel.textContent = '📤 输出:';
+
+            const outputContent = document.createElement('pre');
+            outputContent.textContent = output || '(无输出)';
+
+            outputDiv.appendChild(outputLabel);
+            outputDiv.appendChild(outputContent);
+
+            content.appendChild(inputDiv);
+            content.appendChild(outputDiv);
+
+            header.addEventListener('click', function () {
+                const expanded = content.classList.toggle('expanded');
+                toggle.classList.toggle('expanded', expanded);
+            });
+
+            traceEl.appendChild(header);
+            traceEl.appendChild(content);
+            block.appendChild(traceEl);
+        }
+
+        function addAssistantMsg(text, toolCalls = [], loadedSkills = [], activityTraces = [], thinkingTexts = [], assistantTexts = [], timelineEvents = [], fromHistory = false) {
             clearTransientStatusMessages();
             const normalizedText = String(text || '').trim();
             const hiddenAssistantMessagePrefixes = [
@@ -2109,130 +2424,47 @@
                 messagesEl.appendChild(block);
             }
 
-            // Create tool cards from tool_calls ONLY when loading history
-            // During real-time execution, SSE events create the cards
-            if (fromHistory && toolCalls && toolCalls.length > 0) {
-                toolCalls.forEach((toolCall) => {
-                    const name = String(toolCall.name || 'unknown');
-                    const input = String(toolCall.input || '');
-                    const output = String(toolCall.output || '');
-                    const traceId = String(toolCall.trace_id || toolCall.traceId || `history-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`);
-                    const isApprovalPlaceholderHistory = output.startsWith('__APPROVAL_REQUIRED__');
-                    const isChoicePlaceholderHistory = output.startsWith('__CHOICE_REQUIRED__');
-                    const isRejectedByHumanHistory = output.trim() === 'rejected by human';
+            const normalizedTimelineEvents = normalizeTimelineEvents(timelineEvents);
 
-                    let historyTraceStatus = 'completed';
-                    let historyIconClass = 'trace-icon completed';
-                    let historyIconText = '✓';
-                    let historyStatusText = '已完成';
-                    let historyCardStateClass = 'completed';
-
-                    if (isApprovalPlaceholderHistory) {
-                        historyTraceStatus = 'approval-pending';
-                        historyIconClass = 'trace-icon pending';
-                        historyIconText = '⏸';
-                        historyStatusText = '待批准';
-                        historyCardStateClass = 'pending';
-                    } else if (isChoicePlaceholderHistory) {
-                        historyTraceStatus = 'choice-pending';
-                        historyIconClass = 'trace-icon pending';
-                        historyIconText = '❓';
-                        historyStatusText = '待选择';
-                        historyCardStateClass = 'pending';
-                    } else if (isRejectedByHumanHistory) {
-                        historyTraceStatus = 'rejected';
-                        historyIconClass = 'trace-icon completed';
-                        historyIconText = '✕';
-                        historyStatusText = '已拒绝';
-                        historyCardStateClass = 'completed';
+            if (fromHistory && normalizedTimelineEvents.length > 0) {
+                normalizedTimelineEvents.forEach((event) => {
+                    if (event.type === 'assistant_thinking') {
+                        appendThinkingBlock(block, event.text);
+                        return;
                     }
-
-                    // Create tool card
-                    const traceEl = document.createElement('div');
-                    traceEl.className = 'realtime-trace rounded-xl border border-slate-200 bg-slate-50/80';
-                    traceEl.id = traceId;
-                    traceEl.dataset.traceId = traceId;
-                    traceEl.dataset.traceName = name;
-                    traceEl.dataset.traceStatus = historyTraceStatus;
-                    traceEl.classList.add(historyCardStateClass);
-
-                    const header = document.createElement('div');
-                    header.className = 'trace-header';
-
-                    const toggle = document.createElement('span');
-                    toggle.className = 'trace-toggle';
-                    toggle.textContent = '▶';
-
-                    const icon = document.createElement('span');
-                    icon.className = historyIconClass;
-                    icon.textContent = historyIconText;
-
-                    const nameSpan = document.createElement('span');
-                    nameSpan.className = 'trace-name';
-                    nameSpan.textContent = `${name}`;
-
-                    const status = document.createElement('span');
-                    status.className = 'trace-status';
-                    status.textContent = historyStatusText;
-
-                    header.appendChild(toggle);
-                    header.appendChild(icon);
-                    header.appendChild(nameSpan);
-                    header.appendChild(status);
-
-                    const content = document.createElement('div');
-                    content.className = 'trace-content';
-
-                    const inputDiv = document.createElement('div');
-                    inputDiv.className = 'trace-input';
-
-                    const inputLabel = document.createElement('div');
-                    inputLabel.className = 'trace-label';
-                    inputLabel.textContent = '📥 输入:';
-
-                    const inputContent = document.createElement('pre');
-                    inputContent.textContent = input || '(无输入)';
-
-                    inputDiv.appendChild(inputLabel);
-                    inputDiv.appendChild(inputContent);
-
-                    const outputDiv = document.createElement('div');
-                    outputDiv.className = 'trace-output';
-
-                    const outputLabel = document.createElement('div');
-                    outputLabel.className = 'trace-label';
-                    outputLabel.textContent = '📤 输出:';
-
-                    const outputContent = document.createElement('pre');
-                    outputContent.textContent = output || '(无输出)';
-
-                    outputDiv.appendChild(outputLabel);
-                    outputDiv.appendChild(outputContent);
-
-                    content.appendChild(inputDiv);
-                    content.appendChild(outputDiv);
-
-                    // Toggle expand/collapse on header click
-                    header.addEventListener('click', function () {
-                        const expanded = content.classList.toggle('expanded');
-                        toggle.classList.toggle('expanded', expanded);
-                    });
-
-                    traceEl.appendChild(header);
-                    traceEl.appendChild(content);
-                    block.appendChild(traceEl);
+                    if (event.type === 'assistant_text') {
+                        appendAssistantTextBlock(block, event.text);
+                        return;
+                    }
+                    if (event.type === 'tool' || event.type === 'tool_called') {
+                        appendHistoryToolTraceCard(block, {
+                            name: event.name,
+                            input: event.input,
+                            output: event.output,
+                            trace_id: event.trace_id,
+                        });
+                    }
                 });
+            } else {
+                normalizeTextList(thinkingTexts).forEach((thinkingText) => {
+                    appendThinkingBlock(block, thinkingText);
+                });
+
+                normalizeTextList(assistantTexts).forEach((assistantText) => {
+                    appendAssistantTextBlock(block, assistantText);
+                });
+
+                // Create tool cards from tool_calls ONLY when loading history
+                // During real-time execution, SSE events create the cards
+                if (fromHistory && toolCalls && toolCalls.length > 0) {
+                    toolCalls.forEach((toolCall) => {
+                        appendHistoryToolTraceCard(block, toolCall);
+                    });
+                }
             }
 
             if (!shouldHideText && normalizedText) {
-                const msg = document.createElement('div');
-                msg.className = 'msg a md rounded-chat';
-                const markdownHtml = marked.parse(normalizedText, {
-                    breaks: true,
-                    gfm: true,
-                });
-                msg.innerHTML = DOMPurify.sanitize(markdownHtml);
-                block.appendChild(msg);
+                appendAssistantTextBlock(block, normalizedText);
             }
 
             if (block.children.length === 0) {
@@ -2740,11 +2972,15 @@
             clearMessages();
             (data.items || []).forEach((item) => {
                 if (item.role === 'assistant') {
+                    const meta = item.meta || {};
                     addAssistantMsg(
                         item.content,
                         item.tool_calls || [],
                         item.loaded_skills || [],
                         item.activity_traces || [],
+                        normalizeTextList(meta.ui_thinking_texts || meta.thinking_texts || []),
+                        normalizeTextList(meta.ui_assistant_texts || meta.assistant_texts || []),
+                        normalizeTimelineEvents(meta.ui_timeline_events || []),
                         true  // fromHistory = true, so it creates tool cards
                     );
                 } else {

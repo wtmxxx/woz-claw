@@ -100,6 +100,9 @@ async def stream_chat(user_id: str, session_id: str):
         queue: asyncio.Queue = asyncio.Queue()
         chat_service._tool_trace_queues[session_id] = queue
         try:
+            for buffered_event in chat_service.consume_buffered_tool_trace_events(session_id):
+                if isinstance(buffered_event, dict) and buffered_event:
+                    yield f"data: {json.dumps(buffered_event, ensure_ascii=False)}\n\n"
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30)
@@ -392,6 +395,7 @@ def decide_approval(req: ApprovalDecisionRequest) -> dict[str, Any]:
     command = str(item.get("command", "")).strip()
     if not command:
         raise HTTPException(status_code=400, detail="invalid approval payload")
+    background = bool(item.get("background", False))
 
     if req.approved:
         from wozclaw.agent import ReActMemoryAgent
@@ -401,7 +405,8 @@ def decide_approval(req: ApprovalDecisionRequest) -> dict[str, Any]:
             user_id=user_text,
             session_id=session_text,
         )
-        output = runtime_agent.run_bash_command_after_approval(command)
+        output = runtime_agent.run_bash_command_after_approval(
+            command, background=background)
     else:
         output = "rejected by human"
 
