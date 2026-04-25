@@ -41,3 +41,4 @@ Thumbs.db
 Desktop.ini
 
 config/llm.yaml
+node_modules/
